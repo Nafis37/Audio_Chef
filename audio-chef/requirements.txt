@@ -1,0 +1,4 @@
+nicegui==3.16.0
+numpy==2.5.2
+soundfile==0.14.0
+plotly==6.9.0
