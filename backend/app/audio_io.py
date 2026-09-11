@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -40,3 +41,27 @@ def write_wav_bytes(samples: np.ndarray, samplerate: int) -> bytes:
     clipped = np.clip(np.asarray(samples, dtype=np.float64), -1.0, 1.0)
     sf.write(buffer, clipped, int(samplerate), format="WAV", subtype="PCM_16")
     return buffer.getvalue()
+
+# --------------------------------------------------------------------------------------
+# Decoded-source cache.
+# --------------------------------------------------------------------------------------
+_CACHE_LIMIT = 4
+_cache: "OrderedDict[tuple[str, int, int], tuple[np.ndarray, int]]" = OrderedDict()
+
+
+def load_audio_cached(path: Path) -> tuple[np.ndarray, int]:
+    """load_audio(), but decoding at most once per (file, revision)."""
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+
+    entry = _cache.get(key)
+    if entry is None:
+        entry = load_audio(path)
+        _cache[key] = entry
+        while len(_cache) > _CACHE_LIMIT:
+            _cache.popitem(last=False)      # evict the least recently used
+    else:
+        _cache.move_to_end(key)             # a hit refreshes its position
+
+    samples, samplerate = entry
+    return samples.copy(), samplerate
