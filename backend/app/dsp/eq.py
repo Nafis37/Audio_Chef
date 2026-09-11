@@ -48,3 +48,14 @@ def equalizer(
     for f0, gain in ((low_freq, low_gain), (mid_freq, mid_gain), (high_freq, high_gain)):
         y = apply_peaking(y, fs, f0, q, gain)
     return y
+
+# 1. equalizer() takes the audio and applies low, mid, and high frequency filters one after another.
+# 2. For each filter, we specify frequency (f0), width (Q), and boost/cut (gain_db).
+# 3. peaking_coefficients() converts these 3 settings into numbers called filter coefficients (b0,b1,b2,a0,a1,a2).
+# 4. The RBJ formulas calculate those coefficients so the filter behaves correctly.
+# 5. A represents the requested boost/cut, w0 represents the target frequency, and alpha controls the width.
+# 6. The coefficients describe how much the current and previous audio samples should affect the output.
+# 7. lfilter(b, a, x) then applies those coefficients to every audio sample.
+# 8. If gain is 0 dB, apply_peaking() skips the filter because we don’t want to change anything.
+# 9. The three filters are chained: low → mid → high, so each one changes its own frequency region.
+# 10. So overall: user settings → calculate coefficients → apply filter → get audio with more/less bass, mid, or treble.
