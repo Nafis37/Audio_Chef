@@ -1,0 +1,75 @@
+/* Tailwind v4 is configured entirely from CSS -- this single import pulls in the engine. */
+@import "tailwindcss";
+
+/* The app is light-only by design (an off-white workbench), so the palette lives here as
+   CSS variables and the components reference them through Tailwind arbitrary values.
+
+   Every surface in the app is one of these tokens.  The five greys used to be spread
+   across the components as raw hex literals, which meant re-theming missed half of them
+   and left dark rectangles behind -- keep new surfaces here, not inline.
+
+   Two accent tokens, not one: mint is a FILL colour.  At 4.5:1 against #faf9f6 it fails
+   badly as text (contrast ~1.4:1), so anything that has to be READ -- labels, icons,
+   borders -- uses --chef-accent-strong instead.
+     fills / tints / waveforms / slider thumb   -> --chef-accent
+     text / icons / borders / focus rings       -> --chef-accent-strong          */
+:root {
+  --chef-bg: #faf9f6;              /* page background                    */
+  --chef-panel: #f2efe8;           /* column background                  */
+  --chef-surface: #ffffff;         /* cards: palette items, recipe steps */
+  --chef-inset: #eae6dc;           /* recessed: inputs, selects          */
+  --chef-hover: #e4dfd2;           /* icon-button hover                  */
+  --chef-dragover: #eaf7ee;        /* the recipe list while dragged over */
+  --chef-border: #dcd6c8;          /* hairlines                          */
+  --chef-accent: #86efac;          /* mint: fills only                   */
+  --chef-accent-strong: #16a34a;   /* green: anything that must be read  */
+  --chef-text: #1f2421;
+  --chef-muted: #6b7280;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--chef-bg);
+  color: var(--chef-text);
+  font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin scrollbars so the three columns keep their sharp edges. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--chef-border) transparent;
+}
+
+/* Range inputs: Tailwind cannot style the thumb, so it is done once here. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--chef-border);
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--chef-accent);
+  cursor: pointer;
+  /* The ring is the page colour, so the thumb reads as a disc punched out of the track. */
+  border: 2px solid var(--chef-accent-strong);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--chef-accent-strong);
+  border-radius: 50%;
+  background: var(--chef-accent);
+  cursor: pointer;
+}
