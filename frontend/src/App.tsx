@@ -29,7 +29,6 @@ import { Recipe } from './components/Recipe'
 import { Recorder } from './components/Recorder'
 import { Toolbar } from './components/Toolbar'
 import { WaveformViewer, type RegionSpec } from './components/WaveformViewer'
-import type { Preset } from './presets'
 import { REGION_OPS } from './regions'
 import type { BakeResult, OperationDef, ParamValue, RecipeStep } from './types'
 
@@ -84,16 +83,9 @@ function storedWidth(key: string, fallback: number, min: number, max: number) {
 }
 
 /** Builds a fresh recipe step with every parameter set to its schema default. */
-function newStep(op: OperationDef, overrides?: Record<string, ParamValue>): RecipeStep {
+function newStep(op: OperationDef): RecipeStep {
   const params: Record<string, ParamValue> = {}
   for (const param of op.params) params[param.name] = param.default
-  // A preset only names the few parameters that make the effect; the rest keep the
-  // backend's defaults, so nothing here can drift from the OPERATIONS schema.
-  if (overrides) {
-    for (const param of op.params) {
-      if (param.name in overrides) params[param.name] = overrides[param.name]
-    }
-  }
   return {
     // crypto.randomUUID keeps React keys stable even when the same op is added twice.
     uid: `${op.id}-${crypto.randomUUID()}`,
@@ -291,21 +283,6 @@ export default function App() {
   }, [])
   const toggleAutoBake = useCallback(() => setAutoBake((value) => !value), [])
 
-  /** Drops a whole starter recipe in, skipping any op the backend does not serve. */
-  const applyPreset = useCallback(
-    (preset: Preset) => {
-      const steps = preset.steps.flatMap((entry) => {
-        const definition = operations.find((op) => op.id === entry.op)
-        return definition ? [newStep(definition, entry.params)] : []
-      })
-      if (steps.length > 0) {
-        setRecipe(steps)
-        setActiveUid(steps.find((step) => step.op in REGION_OPS)?.uid ?? null)
-      }
-    },
-    [operations],
-  )
-
   const updateParam = useCallback((uid: string, name: string, value: ParamValue) => {
     setRecipe((current) =>
       current.map((step) =>
@@ -494,7 +471,6 @@ export default function App() {
             onToggleBypass={toggleBypass}
             onRemove={removeStep}
             onClear={handleClear}
-            onApplyPreset={applyPreset}
           />
 
           <ColumnSplitter

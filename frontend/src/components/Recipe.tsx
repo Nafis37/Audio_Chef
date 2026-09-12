@@ -10,17 +10,15 @@
  * stays quiet; the moment there is audio and no recipe it becomes the loudest thing on
  * screen, because "you have a file, now pick an effect" is exactly the step people were
  * getting stuck on.  It renders as a SIBLING of the droppable, not inside it: dnd
- * measures the droppable once at drag start, and unmounting ~200px of preset chips from
- * within it the instant `isDraggingOver` flips left every cached dimension stale.
+ * measures the droppable once at drag start, and unmounting the whole box from within it
+ * the instant `isDraggingOver` flips would leave every cached dimension stale.
  */
 
 import { Droppable, Draggable } from '@hello-pangea/dnd'
 import { Trash2 } from 'lucide-react'
 import { memo, useMemo } from 'react'
 import { RecipeCard } from './RecipeCard'
-import { iconFor } from '../icons'
 import { TIME_SHIFTING_OPS } from '../regions'
-import { PRESETS, type Preset } from '../presets'
 import type { OperationDef, ParamValue, RecipeStep } from '../types'
 
 interface Props {
@@ -34,7 +32,6 @@ interface Props {
   onToggleBypass: (uid: string) => void
   onRemove: (uid: string) => void
   onClear: () => void
-  onApplyPreset: (preset: Preset) => void
 }
 
 function RecipeImpl({
@@ -47,7 +44,6 @@ function RecipeImpl({
   onToggleBypass,
   onRemove,
   onClear,
-  onApplyPreset,
 }: Props) {
   const byId = useMemo(() => new Map(operations.map((op) => [op.id, op])), [operations])
   const empty = recipe.length === 0
@@ -140,28 +136,6 @@ function RecipeImpl({
                 </p>
               </>
             )}
-
-            {/* Starter recipes -- the fastest way to hear the thing actually work. */}
-            <p className="mt-5 mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--chef-muted)]">
-              or start from a preset
-            </p>
-            <div className="flex flex-wrap justify-center gap-1.5">
-              {PRESETS.map((preset) => {
-                const Icon = iconFor(preset.icon)
-                return (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    title={preset.description}
-                    onClick={() => onApplyPreset(preset)}
-                    className="flex items-center gap-1.5 rounded-full border border-[var(--chef-border)] bg-[var(--chef-surface)] px-2.5 py-1 text-xs text-[var(--chef-text)] transition hover:border-[var(--chef-accent-strong)] hover:text-[var(--chef-accent-strong)]"
-                  >
-                    <Icon className="size-3.5 text-[var(--chef-accent-strong)]" />
-                    {preset.label}
-                  </button>
-                )
-              })}
-            </div>
           </div>
         )}
       </div>

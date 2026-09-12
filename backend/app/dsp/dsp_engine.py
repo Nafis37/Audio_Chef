@@ -15,7 +15,6 @@ from .editor import splice, trim
 from .eq import equalizer
 from .noise import noise_reduce
 from .speed_pitch import speed_pitch
-from .voice_changer import voice_changer
 
 
 # --------------------------------------------------------------------------------------
@@ -95,7 +94,8 @@ OPERATIONS: list[dict[str, Any]] = [
         "id": "echo_reverb",
         "label": "Echo & Reverb Studio",
         "icon": "AudioLines",
-        "description": "Feedback delay line, or a Schroeder reverb (4 combs + 2 allpasses).",
+        "description": "Convolution with a synthesised impulse response: a tapped delay line "
+                       "for echo, a decaying-noise room for reverb.",
         "handler": _echo_reverb_op,
         "params": [
             _enum("mode", "Mode", "echo", ["echo", "reverb"]),
@@ -143,19 +143,6 @@ OPERATIONS: list[dict[str, Any]] = [
             _num("release", "Release", 100.0, 5.0, 1000.0, 1.0, "ms"),
             _num("knee", "Knee", 6.0, 0.0, 24.0, 0.5, "dB"),
             _num("makeup", "Makeup gain", 0.0, 0.0, 24.0, 0.5, "dB"),
-        ],
-    },
-    {
-        "id": "voice_changer",
-        "label": "Phase Vocoder Voice Changer",
-        "icon": "Mic",
-        "description": "Moves STFT bins during phase accumulation: pitch and formants shift, "
-                       "duration does not.",
-        "handler": voice_changer,
-        "params": [
-            _num("semitones", "Pitch", 4.0, -24.0, 24.0, 0.5, "st"),
-            _num("formant", "Formant", 0.0, -12.0, 12.0, 0.5, "st"),
-            _enum("mode", "Mode", "pitch", ["pitch", "robot", "whisper"]),
         ],
     },
 ]

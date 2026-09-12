@@ -85,27 +85,31 @@ const BUILDERS: Record<string, Builder> = {
     }
   },
 
-  // echo_reverb.py -- feedback comb, or a Schroeder (1962) reverb.
+  // echo_reverb.py -- convolution with a tapped-delay IR, or with a synthesised room.
   echo_reverb: (get, fs) => {
     const mix = Number(get('mix'))
     if (get('mode') === 'reverb') {
       const decay = Number(get('decay'))
       return {
-        equation: `g = 10^(−3·D / ${num(decay)}s)   ·   mix ${Math.round(mix * 100)}%`,
+        equation:
+          `y[n] = Σₖ h[k]·x[n−k],  h[k] = w[k]·10^(−3k / (${num(decay)}s·${fs} Hz))` +
+          `   ·   mix ${Math.round(mix * 100)}%`,
         effect:
-          `Four parallel feedback combs plus two allpasses (Schroeder 1962). Each comb gain is set ` +
-          `so its echoes fall 60 dB over ${num(decay)}s, which is why the output grows a smooth ` +
-          `tail that keeps going after the input has stopped.`,
+          `The input is convolved with a synthesised room response: a few early reflections over ` +
+          `noise w[k] that fades 60 dB in ${num(decay)}s. Every sample of the output is a sum over ` +
+          `that whole response, which is why the result grows a smooth tail instead of discrete ` +
+          `repeats.`,
       }
     }
     const delay = Number(get('delay'))
     const feedback = Number(get('feedback'))
     return {
       equation:
-        `y[n] = x[n] + ${num(feedback)}·y[n−D],  D = ${num(delay)}s × ${fs} Hz = ` +
+        `y = x ⊛ h,  h = Σₖ ${num(feedback)}^k·δ[n − k·D],  D = ${num(delay)}s × ${fs} Hz = ` +
         `${Math.round(delay * fs)} samples`,
       effect:
-        `A recursive delay line: each repeat is ${num(feedback)}× the one before, so copies of the ` +
+        `Convolution with a tapped delay line: the impulse response is one spike every ` +
+        `${Math.round(delay * fs)} samples, each ${num(feedback)}× the last, so copies of the ` +
         `waveform appear every ${num(delay)}s and die away geometrically. Overlapping repeats add, ` +
         `which is how an echo can push the output past full scale.`,
     }
@@ -186,38 +190,6 @@ const BUILDERS: Record<string, Builder> = {
         `${Math.abs(makeup) > 0.05 ? `, then the whole thing is lifted ${signed(makeup)} dB` : ''}. ` +
         `Peaks come down while the average does not, which is exactly why the output looks like a ` +
         `solid block rather than spikes — watch the crest factor above.`,
-    }
-  },
-
-  // voice_changer.py -- bin shifting during phase accumulation.
-  voice_changer: (get) => {
-    const semitones = Number(get('semitones'))
-    const formant = Number(get('formant'))
-    const mode = String(get('mode'))
-    const ratio = Math.pow(2, semitones / 12)
-    if (mode === 'robot') {
-      return {
-        equation: '∠Y(k) = 0   (phase zeroed every frame)',
-        effect:
-          'Throwing the phase away makes every frame restart together, so the output becomes ' +
-          'strictly periodic at the hop rate — one monotone buzz carrying the original spectral ' +
-          'envelope, and a visibly regular waveform.',
-      }
-    }
-    if (mode === 'whisper') {
-      return {
-        equation: '∠Y(k) = uniform random on (−π, π]',
-        effect:
-          'Random phase destroys the pitch periodicity while each frame keeps its magnitude ' +
-          'spectrum, so the output loses its regular cycles and draws as noise.',
-      }
-    }
-    return {
-      equation: `bin k → k · 2^(${num(semitones, 0)}/12) = k · ${num(ratio, 3)}`,
-      effect:
-        `Bins are moved during phase accumulation and the frames are laid back down on the same ` +
-        `hop, so pitch shifts ${num(semitones, 0)} semitones while the duration does not change` +
-        `${Math.abs(formant) > 1e-3 ? `; formants move a further ${num(formant, 0)} st` : ''}.`,
     }
   },
 }

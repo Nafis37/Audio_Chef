@@ -1,7 +1,6 @@
 """
 Simple Audio Compressor -- envelope follower + dB-domain gain computer
 =====================================================================
-(full derivation in the sections above)
 """
 
 from __future__ import annotations
@@ -28,13 +27,20 @@ def envelope_follower(x: np.ndarray, fs: int, attack_ms: float, release_ms: floa
     return env
 
 
+# threshold → WHEN should compression happen?
+# ratio     → HOW MUCH compression?
+# attack    → HOW FAST should it turn on?
+# release   → HOW FAST should it turn off?
+# knee      → HOW SMOOTHLY should it turn on?
+# makeup    → HOW MUCH volume should I add afterward?
+
 def compressor(
     x: np.ndarray,
     fs: int,
-    threshold: float = -20.0,
-    ratio: float = 4.0,
-    attack: float = 10.0,
-    release: float = 100.0,
+    threshold: float = -20.0,   # threshold less = strongly compression
+    ratio: float = 4.0,         # more = more compression 10:1
+    attack: float = 10.0,       # how quickly want to response to the loud audio
+    release: float = 100.0,     # hwo quickly want to response to the quiet audio
     knee: float = 6.0,
     makeup: float = 0.0,
 ) -> np.ndarray:
@@ -46,6 +52,8 @@ def compressor(
     ratio = max(float(ratio), 1.0)
     knee = max(float(knee), 0.0)
 
+    #attack = how fast do I want envelope to change when the audio gets louder
+    #release = how fast do I want envelope to change when the audio get quieter
     env = envelope_follower(x, fs, attack, release)
     env_db = 20.0 * np.log10(np.maximum(env, EPS))       # envelope in dBFS
     over = env_db - threshold                            # how far above the threshold

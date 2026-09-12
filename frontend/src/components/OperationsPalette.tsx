@@ -1,12 +1,12 @@
 /**
  * Column 1 -- the Operations Palette.
  *
- * The 7 audio tools.  Each entry is a @hello-pangea/dnd Draggable living in a droppable
+ * The 6 audio tools.  Each entry is a @hello-pangea/dnd Draggable living in a droppable
  * that never accepts drops (`isDropDisabled`), so the only thing you can do with a palette
  * item is drag it OUT, into the recipe column.  Clicking an item adds it too, which is
  * faster once you know the tools.
  *
- * There is no search box: seven entries all fit on screen at once, so filtering them was
+ * There is no search box: six entries all fit on screen at once, so filtering them was
  * a control that cost more attention than it saved.
  *
  * Two things here are load-bearing and easy to undo by accident:
@@ -73,7 +73,6 @@ function PaletteItem({ op, drag, isDragging, onAdd }: ItemProps) {
         <Icon className="size-4 shrink-0 text-[var(--chef-accent-strong)]" />
         <span className="text-sm font-medium">{op.label}</span>
       </div>
-      <p className="mt-1 text-xs leading-snug text-[var(--chef-muted)]">{op.description}</p>
     </div>
   )
 }
