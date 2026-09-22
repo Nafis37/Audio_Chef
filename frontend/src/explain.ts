@@ -57,6 +57,44 @@ function activeBands(get: (name: string) => ParamValue): string[] {
 type Builder = (get: (name: string) => ParamValue, fs: number) => StepExplanation
 
 const BUILDERS: Record<string, Builder> = {
+  // mixer.py -- the only op that reads audio from outside its own chain.
+  assemble: (get, fs) => {
+    const mode = String(get('mode'))
+    const gain = Number(get('gain'))
+    const g = 10 ** (gain / 20)
+    const position = Number(get('position'))
+    const start = Number(get('clip_start'))
+    const end = Number(get('clip_end'))
+    const p = Math.round(position * fs)
+    const span =
+      end > start
+        ? `${num(start)}–${num(end)}s (${num(end - start)}s)`
+        : start > 0
+          ? `${num(start)}s to its end`
+          : 'the whole clip'
+
+    const equation =
+      mode === 'mix'
+        ? `y[n] = x[n] + ${num(g, 3)}·c[n − ${p.toLocaleString()}],  length = max(N, ${p.toLocaleString()} + M)`
+        : mode === 'insert'
+          ? `y = [ x[0…${p.toLocaleString()}) , ${num(g, 3)}·c , x[${p.toLocaleString()}…N) ],  length = N + M`
+          : `y = [ x , ${num(g, 3)}·c ],  length = N + M`
+
+    const effect =
+      (mode === 'mix'
+        ? `The clip is ADDED on top, so both play at once and the two waveforms sum sample by ` +
+          `sample — which is also how this step can push the result past full scale even when ` +
+          `neither part was close to it on its own. `
+        : mode === 'insert'
+          ? `The buffer is cut open at ${num(position)}s and the clip is dropped into the gap, so ` +
+            `everything after it moves later by the clip's length. `
+          : `The clip is joined onto the end, so nothing already in the buffer moves. `) +
+      `The clip is ${span} of the other source AFTER that source's own recipe has run, taken at ` +
+      `${signed(gain)} dB (×${num(g, 3)}). Both cut edges get a 5 ms fade so the joins do not click.`
+
+    return { equation, effect }
+  },
+
   // noise.py -- spectral subtraction with a spectral floor.
   noise_remover: (get) => {
     const amount = Number(get('amount'))

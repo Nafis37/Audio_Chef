@@ -15,8 +15,12 @@ import numpy as np
 FADE_MS = 5.0   # length of the anti-click fade applied at cut boundaries
 
 
-def _fade_edges(x: np.ndarray, fs: int, fade_in: bool = True, fade_out: bool = True) -> np.ndarray:
-    """Apply a short linear fade at the start and/or end of a buffer."""
+def fade_edges(x: np.ndarray, fs: int, fade_in: bool = True, fade_out: bool = True) -> np.ndarray:
+    """Apply a short linear fade at the start and/or end of a buffer.
+
+    Public because the mixer creates joins of its own and has to close them with the
+    same ramp this module uses -- one fade policy for the whole app.
+    """
     n = int(FADE_MS * fs / 1000.0) # fade length
     if n <= 0 or x.size < 2 * n:
         return x
@@ -29,7 +33,7 @@ def _fade_edges(x: np.ndarray, fs: int, fade_in: bool = True, fade_out: bool = T
     return y
 
 
-def _to_samples(seconds: float, fs: int, length: int) -> int:
+def to_samples(seconds: float, fs: int, length: int) -> int:
     """Seconds -> a sample index clamped into [0, length]."""
     return int(np.clip(round(seconds * fs), 0, length))
 
@@ -37,20 +41,20 @@ def _to_samples(seconds: float, fs: int, length: int) -> int:
 def trim(x: np.ndarray, fs: int, start: float = 0.0, end: float = 0.0) -> np.ndarray:
     """Keep only the region between `start` and `end` seconds (end <= 0 means 'to the end')."""
     x = np.asarray(x, dtype=np.float64)
-    a = _to_samples(start, fs, x.size)
-    b = x.size if end <= 0 else _to_samples(end, fs, x.size)
+    a = to_samples(start, fs, x.size)
+    b = x.size if end <= 0 else to_samples(end, fs, x.size)
     if b <= a:
         return np.zeros(0, dtype=np.float64)
-    return _fade_edges(x[a:b], fs)
+    return fade_edges(x[a:b], fs)
 
 
 def splice(x: np.ndarray, fs: int, start: float = 0.0, end: float = 0.0) -> np.ndarray:
     """Cut the region between `start` and `end` seconds OUT and join what remains."""
     x = np.asarray(x, dtype=np.float64)
-    a = _to_samples(start, fs, x.size)
-    b = _to_samples(end, fs, x.size)
+    a = to_samples(start, fs, x.size)
+    b = to_samples(end, fs, x.size)
     if b <= a:
         return x
-    head = _fade_edges(x[:a], fs, fade_in=False, fade_out=True)   # fade down into the cut
-    tail = _fade_edges(x[b:], fs, fade_in=True, fade_out=False)   # fade up out of the cut
+    head = fade_edges(x[:a], fs, fade_in=False, fade_out=True)   # fade down into the cut
+    tail = fade_edges(x[b:], fs, fade_in=True, fade_out=False)   # fade up out of the cut
     return np.concatenate([head, tail])

@@ -1,4 +1,9 @@
-"""POST /process -- run a recipe over a previously uploaded file and return a WAV.
+"""POST /process -- render a multi-source project and return a WAV.
+
+A project is a set of named sources, each with its own recipe, plus a master recipe that
+runs over whichever source is designated the output.  An `assemble` card inside one
+source's recipe pulls in another source's PROCESSED audio, so the set is a graph; the
+walk lives in dsp/graph.py and this module is only the HTTP shell around it.
 
 GET /operations exposes the same catalogue the DSP engine validates against, so the
 palette in the browser is generated from the backend's own schema.
@@ -7,16 +12,22 @@ palette in the browser is generated from the backend's own schema.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..audio_io import load_audio_cached, resolve_source, write_wav_bytes
-from ..dsp import analysis, dsp_engine
+from .. import config
+from ..audio_io import load_audio_at, probe, resolve_source, write_wav_bytes
+from ..dsp import analysis, dsp_engine, graph
 
 router = APIRouter()
+
+# Source ids are minted by the browser and echoed back inside error messages, so they are
+# held to something narrow rather than trusted.
+_SOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
 
 class RecipeStep(BaseModel):
@@ -25,58 +36,122 @@ class RecipeStep(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class ProcessRequest(BaseModel):
+class SourceSpec(BaseModel):
+    """One loaded file and the recipe that belongs to it.
+
+    `id` is separate from `file_id` on purpose: the same upload can be loaded twice under
+    two ids with two different chains -- a dry copy and a reverb copy, mixed together --
+    which keying on file_id alone would make impossible.
+    """
+
+    id: str
     file_id: str
     recipe: list[RecipeStep] = Field(default_factory=list)
 
 
+class ProcessRequest(BaseModel):
+    sources: list[SourceSpec] = Field(default_factory=list)
+    master: list[RecipeStep] = Field(default_factory=list)
+    # Whose processed buffer gets rendered.  Not necessarily the source being edited:
+    # the UI auditions a chain by pointing this at it with apply_master off.
+    output_source: str
+    apply_master: bool = True
+    # Overrides the automatic choice (the highest rate among the sources).
+    sample_rate: int | None = None
+
+
 @router.get("/operations")
 def list_operations() -> list[dict]:
-    """The 7 tools and their parameter schemas (min/max/step/default/unit)."""
+    """The tool catalogue and its parameter schemas (min/max/step/default/unit)."""
     return dsp_engine.operations_schema()
+
+
+def _validate(request: ProcessRequest) -> None:
+    """Everything that can be rejected without touching the filesystem."""
+    if not request.sources:
+        raise HTTPException(status_code=400, detail="No sources loaded.")
+    if len(request.sources) > config.MAX_SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many sources -- this project holds at most {config.MAX_SOURCES}.",
+        )
+
+    seen: set[str] = set()
+    for spec in request.sources:
+        # file_id comes from the client, so refuse anything that could escape storage.
+        if not spec.file_id.isalnum():
+            raise HTTPException(status_code=400, detail="Malformed file_id.")
+        if not _SOURCE_ID.fullmatch(spec.id):
+            raise HTTPException(status_code=400, detail=f"Malformed source id {spec.id!r}.")
+        if spec.id in seen:
+            raise HTTPException(status_code=400, detail=f"Duplicate source id {spec.id!r}.")
+        seen.add(spec.id)
+
+    if request.output_source not in seen:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Output source {request.output_source!r} is not one of the loaded sources.",
+        )
 
 
 @router.post("/process")
 def process(request: ProcessRequest) -> Response:
-    # file_id comes from the client, so refuse anything that could escape the storage dir.
-    if not request.file_id.isalnum():
-        raise HTTPException(status_code=400, detail="Malformed file_id.")
+    _validate(request)
 
-    # Uploads keep their own extension, so the id has to be resolved rather than formatted.
-    path = resolve_source(request.file_id)
-    if path is None:
-        raise HTTPException(status_code=404, detail="Unknown file_id -- re-upload the audio.")
+    # Resolve every upload up front: a missing file should fail before any DSP runs, and
+    # the project's sample rate is decided from the whole set.  probe() reads the header
+    # only, so this costs no decoding.
+    paths = {}
+    rates = []
+    for spec in request.sources:
+        path = resolve_source(spec.file_id)
+        if path is None:
+            raise HTTPException(
+                status_code=404, detail="Unknown file_id -- re-upload the audio."
+            )
+        paths[spec.file_id] = path
+        rates.append(probe(path)["sample_rate"])
 
-    samples, samplerate = load_audio_cached(path)
+    project_fs = graph.project_sample_rate(
+        rates, request.sample_rate, config.MAX_PROJECT_SAMPLE_RATE
+    )
+
+    def loader(file_id: str):
+        """Decode one source at the project rate.  Injected so graph.py stays file-free."""
+        return load_audio_at(paths[file_id], project_fs)
 
     started = time.perf_counter()
     try:
-        processed, report = dsp_engine.run_recipe_measured(
-            samples, samplerate, [step.model_dump() for step in request.recipe]
+        processed, raw_input, report = graph.evaluate(
+            sources=request.sources,
+            master=request.master,
+            output_source=request.output_source,
+            loader=loader,
+            fs=project_fs,
+            apply_master=request.apply_master,
         )
-    except ValueError as exc:                    # unknown op id from run_recipe
+    except ValueError as exc:      # unknown op id, or any graph.GraphError
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
-    # Both buffers are already in memory, so the Listen panel's numbers cost a few O(N)
-    # passes here rather than a second decode in the browser -- and they describe the
-    # exact mono float64 signal the DSP actually ran on.
+    # "input" stays the RAW buffer of the rendered source, which is what the Input
+    # waveform shows and what the input column of the stats table has always meant.
     stats = {
-        "sample_rate": samplerate,
-        "input": analysis.measure(samples, samplerate),
-        "output": analysis.measure(processed, samplerate),
+        "sample_rate": project_fs,
+        "input": analysis.measure(raw_input, project_fs),
+        "output": analysis.measure(processed, project_fs),
         **report,
     }
 
-    wav_bytes = write_wav_bytes(processed, samplerate)
+    wav_bytes = write_wav_bytes(processed, project_fs)
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
         headers={
             # Read by the UI to show "baked in 143 ms"; must be exposed for CORS to allow it.
             "X-Bake-Ms": f"{elapsed_ms:.1f}",
-            "X-Output-Duration": f"{len(processed) / samplerate:.3f}",
-            # Input/output measurements plus what the fold did, as one compact JSON
+            "X-Output-Duration": f"{len(processed) / project_fs:.3f}",
+            # Input/output measurements plus what the walk did, as one compact JSON
             # header, so a bake stays a single round trip.
             "X-Bake-Stats": json.dumps(stats, separators=(",", ":")),
             # No Content-Disposition: the browser fetches this, turns it into a blob URL

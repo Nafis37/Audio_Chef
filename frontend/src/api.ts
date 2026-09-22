@@ -5,7 +5,15 @@
  * (see vite.config.ts), so there is no hard-coded port in the app code.
  */
 
-import type { BakeResult, BakeStats, OperationDef, RecipeStep, UploadInfo } from './types'
+import type {
+  BakeResult,
+  BakeStats,
+  OperationDef,
+  ProcessGraphRequest,
+  RecipeStep,
+  UploadInfo,
+  WireStep,
+} from './types'
 
 const BASE = '/api'
 
@@ -48,27 +56,27 @@ export async function uploadFile(file: File): Promise<UploadInfo> {
   return response.json()
 }
 
+/** The backend only cares about op / bypass / params -- uid is a UI concern. */
+export function toWire(recipe: RecipeStep[]): WireStep[] {
+  return recipe.map(({ op, bypass, params }) => ({ op, bypass, params }))
+}
+
 /**
- * POST /process -- run the recipe and hand back an object URL for the rendered WAV.
+ * POST /process -- render the project and hand back an object URL for the rendered WAV.
  *
  * `signal` comes from an AbortController owned by the caller: while Auto-Bake is on, a
  * new slider move should cancel the request that is already in flight instead of racing
  * it, otherwise a slow older bake can land after a newer one and show a stale waveform.
  */
-export async function processRecipe(
-  fileId: string,
-  recipe: RecipeStep[],
+export async function processGraph(
+  request: ProcessGraphRequest,
   signal?: AbortSignal,
 ): Promise<BakeResult> {
   const response = await fetch(`${BASE}/process`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal,
-    body: JSON.stringify({
-      file_id: fileId,
-      // The backend only cares about op / bypass / params -- uid is a UI concern.
-      recipe: recipe.map(({ op, bypass, params }) => ({ op, bypass, params })),
-    }),
+    body: JSON.stringify(request),
   })
   if (!response.ok) throw new Error(await detail(response))
 

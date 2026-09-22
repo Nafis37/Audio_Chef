@@ -19,7 +19,16 @@ import { Trash2 } from 'lucide-react'
 import { memo, useMemo } from 'react'
 import { RecipeCard } from './RecipeCard'
 import { TIME_SHIFTING_OPS } from '../regions'
-import type { OperationDef, ParamValue, RecipeStep } from '../types'
+import { MASTER, type ChainId, type OperationDef, type ParamValue, type RecipeStep } from '../types'
+
+export interface ChainTab {
+  id: ChainId
+  label: string
+  /** How many live steps this chain holds -- shown as a count on the chip. */
+  steps: number
+  /** This chain's output is what Export renders.  Only ever one. */
+  isOutput: boolean
+}
 
 interface Props {
   recipe: RecipeStep[]
@@ -27,6 +36,11 @@ interface Props {
   hasFile: boolean
   /** uid of the step whose region is drawn on the Input waveform, if any. */
   activeUid: string | null
+  /** One chip per source plus MASTER. */
+  tabs: ChainTab[]
+  /** Which chain the `recipe` above belongs to. */
+  selected: ChainId
+  onSelectTab: (id: ChainId) => void
   onSelect: (uid: string) => void
   onParamChange: (uid: string, name: string, value: ParamValue) => void
   onToggleBypass: (uid: string) => void
@@ -39,6 +53,9 @@ function RecipeImpl({
   operations,
   hasFile,
   activeUid,
+  tabs,
+  selected,
+  onSelectTab,
   onSelect,
   onParamChange,
   onToggleBypass,
@@ -64,10 +81,46 @@ function RecipeImpl({
         </button>
       </header>
 
+      {/* One chip per source plus MASTER.  Each source carries its own chain, so this is
+          what makes "EQ the vocals, compress the drums" expressible at all. */}
+      {tabs.length > 0 && (
+        <div className="flex flex-wrap gap-1 border-b border-[var(--chef-border)] px-3 py-2">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onSelectTab(tab.id)}
+              title={tab.id === MASTER ? 'Runs over the finished mix' : `Recipe for ${tab.label}`}
+              className={`flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition ${
+                tab.id === selected
+                  ? 'border-[var(--chef-accent-strong)] bg-[var(--chef-accent)]/25 text-[var(--chef-accent-strong)]'
+                  : 'border-[var(--chef-border)] text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
+              }`}
+            >
+              {tab.isOutput && (
+                <span title="This source is what Export renders" className="text-amber-500">
+                  ★
+                </span>
+              )}
+              <span className="truncate">
+                {tab.id === MASTER ? 'MASTER' : tab.label}
+              </span>
+              {tab.steps > 0 && (
+                <span className="font-mono opacity-60">{tab.steps}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* The scroller holds the droppable AND the empty state, so column 2 still scrolls
           as one surface even though only the first of the two accepts drops. */}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <Droppable droppableId="recipe">
+        {/* The droppable id carries the chain, so switching tabs is a NEW droppable
+            rather than the same one with its items swapped underneath.  dnd measures a
+            droppable once at drag start; reusing a fixed id across a tab switch is
+            exactly how its cached dimensions go stale. */}
+        <Droppable droppableId={`recipe:${selected}`}>
           {(provided, snapshot) => (
             <div
               ref={provided.innerRef}
@@ -125,7 +178,9 @@ function RecipeImpl({
                   Pick an operation on the left
                 </p>
                 <p className="mt-1 text-xs text-[var(--chef-muted)]">
-                  Click it or drag it here. Steps run top to bottom.
+                  {selected === MASTER
+                    ? 'Steps here run over the finished mix, after every source chain.'
+                    : 'Click it or drag it here. Steps run top to bottom, on this source only.'}
                 </p>
               </>
             ) : (

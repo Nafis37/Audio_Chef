@@ -7,6 +7,7 @@
 import {
   AudioLines,
   Gauge,
+  Layers,
   Mic,
   Minimize2,
   Scissors,
@@ -24,6 +25,7 @@ const ICONS: Record<string, LucideIcon> = {
   Gauge,
   Minimize2,
   Mic,
+  Layers,
 }
 
 /** Falls back to a generic wand for any icon name we do not know about yet. */

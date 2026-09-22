@@ -1,36 +1,51 @@
 /**
  * Audio Chef -- CyberChef, but for audio.
  *
- * This component owns all of the global state and wires the three columns together:
+ * This component owns all of the global state and wires the columns together:
  *
+ *   Sources rail        every loaded file, plus which one is the project output
  *   Column 1  Operations Palette  (drag source)
- *   Column 2  The Recipe          (ordered list of operations + their parameters)
+ *   Column 2  The Recipe          (the chain belonging to the selected source, or MASTER)
  *   Column 3  Input / Output      (two Wavesurfer views)
+ *
+ * A project is a SET of sources, each with its own recipe, plus a master recipe that runs
+ * over whichever source is designated the output.  An `assemble` card inside one chain
+ * pulls in another source's processed audio, so the chains form a graph; the backend
+ * walks it in dsp/graph.py.
  *
  * Data flow:
  *   1. the tool catalogue is fetched once from GET /operations
- *   2. the WAV is POSTed once to /upload, which returns a file_id
- *   3. every bake POSTs {file_id, recipe} to /process and gets a rendered WAV back
+ *   2. each file is POSTed once to /upload, which returns a file_id
+ *   3. every bake POSTs the whole project to /process and gets a rendered WAV back
  *
- * With Auto-Bake on, step 3 fires (debounced) whenever the recipe or any parameter
- * changes, which is what makes the app feel live.  An EMPTY recipe never bakes: there is
- * nothing to hear that the Input panel is not already showing, and re-encoding the file
- * the instant it was uploaded was pure noise.
+ * With Auto-Bake on, step 3 fires (debounced) whenever any chain or parameter changes.
+ * A project where EVERY chain is empty never bakes: there is nothing to hear that the
+ * Input panel is not already showing.
  */
 
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd'
 import { ChefHat, Upload } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchOperations, processRecipe, uploadFile } from './api'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { fetchOperations, processGraph, toWire, uploadFile } from './api'
 import { ColumnSplitter } from './components/ColumnSplitter'
 import { ListenStats } from './components/ListenStats'
 import { OperationsPalette } from './components/OperationsPalette'
-import { Recipe } from './components/Recipe'
+import { Recipe, type ChainTab } from './components/Recipe'
 import { Recorder } from './components/Recorder'
+import { SourcesRail } from './components/SourcesRail'
 import { Toolbar } from './components/Toolbar'
 import { WaveformViewer, type RegionSpec } from './components/WaveformViewer'
 import { REGION_OPS } from './regions'
-import type { BakeResult, OperationDef, ParamValue, RecipeStep } from './types'
+import { SourcesProvider, type SourceOption } from './sources'
+import {
+  MASTER,
+  type BakeResult,
+  type ChainId,
+  type OperationDef,
+  type ParamValue,
+  type RecipeStep,
+  type Source,
+} from './types'
 
 /** A bake faster than this never shows the "baking…" overlay -- it would only flicker. */
 const BUSY_DELAY_MS = 150
@@ -97,18 +112,20 @@ function newStep(op: OperationDef): RecipeStep {
 
 export default function App() {
   const [operations, setOperations] = useState<OperationDef[]>([])
-  const [recipe, setRecipe] = useState<RecipeStep[]>([])
 
-  const [fileId, setFileId] = useState<string | null>(null)
-  const [filename, setFilename] = useState<string | null>(null)
-  const [fileInfo, setFileInfo] = useState<string | null>(null)
-  const [inputUrl, setInputUrl] = useState<string | null>(null)
-  // The Input's length in seconds, kept as a number (fileInfo below is display text).
-  // The region needs it: `end = 0` means "to the end" to the backend, and a handle still
-  // has to be drawn somewhere concrete.
-  const [inputDuration, setInputDuration] = useState(0)
-  // uid of the step whose time parameters the waveform region is driving, if any.
-  const [activeUid, setActiveUid] = useState<string | null>(null)
+  // --- The project ------------------------------------------------------------------
+  const [sources, setSources] = useState<Source[]>([])
+  const [master, setMaster] = useState<RecipeStep[]>([])
+  const [masterActiveUid, setMasterActiveUid] = useState<string | null>(null)
+  /** Which chain column 2 is editing.  A source id, or MASTER. */
+  const [editing, setEditing] = useState<ChainId>(MASTER)
+  /**
+   * Whose processed chain feeds master and what Export renders.  Kept separate from
+   * `editing` on purpose: Export needs a stable answer to "what is this project's
+   * output" regardless of which tab happens to be open at the time.
+   */
+  const [outputId, setOutputId] = useState<string | null>(null)
+
   const [output, setOutput] = useState<BakeResult | null>(null)
 
   // Column widths.  Lazily initialised so localStorage is touched once, not per render.
@@ -131,8 +148,11 @@ export default function App() {
   // Held so the object URLs can be revoked (they leak otherwise).  These are refs, not
   // state updaters: React 19 StrictMode double-invokes updaters, so creating/revoking a
   // URL inside one leaked a blob on every upload.
-  const previousInputUrl = useRef<string | null>(null)
+  const inputUrls = useRef(new Map<string, string>())
   const previousOutputUrl = useRef<string | null>(null)
+  // Source ids must stay unique for the lifetime of the session, including across
+  // removals -- an assemble card may still be pointing at an id that has gone.
+  const nextSourceId = useRef(1)
   // Counts dragenter/dragleave so moving over a child element does not clear the state.
   const dragDepth = useRef(0)
   // Delays the "baking…" overlay; a fast bake should update silently, not flash.
@@ -149,10 +169,11 @@ export default function App() {
       .catch(() => setError('Backend unreachable — is uvicorn running on port 8000?'))
   }, [])
 
-  // Nothing else frees these, so release both blobs when the workbench goes away.
+  // Nothing else frees these, so release every blob when the workbench goes away.
   useEffect(
     () => () => {
-      if (previousInputUrl.current) URL.revokeObjectURL(previousInputUrl.current)
+      for (const url of inputUrls.current.values()) URL.revokeObjectURL(url)
+      inputUrls.current.clear()
       if (previousOutputUrl.current) URL.revokeObjectURL(previousOutputUrl.current)
       if (busyTimer.current !== null) clearTimeout(busyTimer.current)
     },
@@ -166,35 +187,114 @@ export default function App() {
   }, [])
 
   // --- Upload -----------------------------------------------------------------------
+  /** Adds a file to the project.  Never replaces: that is what the rail's x is for. */
   const handleFile = useCallback(async (file: File) => {
     setError(null)
     setStatus('Uploading…')
     try {
       const info = await uploadFile(file)
-      setFileId(info.file_id)
-      setFilename(info.filename)
-      setFileInfo(
-        `${info.duration.toFixed(2)}s · ${info.sample_rate} Hz · ${info.channels}ch`,
-      )
-      setInputDuration(info.duration)
+      const id = `s${nextSourceId.current++}`
 
-      if (previousInputUrl.current) URL.revokeObjectURL(previousInputUrl.current)
       const url = URL.createObjectURL(file)   // the input waveform is drawn locally
-      previousInputUrl.current = url
-      setInputUrl(url)
+      inputUrls.current.set(id, url)
+
+      setSources((current) => [
+        ...current,
+        {
+          id,
+          fileId: info.file_id,
+          filename: info.filename,
+          url,
+          sampleRate: info.sample_rate,
+          channels: info.channels,
+          duration: info.duration,
+          recipe: [],
+          activeUid: null,
+        },
+      ])
+      // The first file becomes the output and the edited chain, so a one-file project
+      // behaves exactly as it did before any of this existed.
+      setOutputId((current) => current ?? id)
+      setEditing((current) => (current === MASTER && sources.length === 0 ? id : current))
 
       setStatus('Ready — add an operation to the recipe')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed')
       setStatus('')
     }
+  }, [sources.length])
+
+  const removeSource = useCallback(
+    (id: string) => {
+      // Revoke out here, not inside an updater: StrictMode double-invokes updaters, and
+      // revoking twice would kill a URL that a re-render is still handing to wavesurfer.
+      const url = inputUrls.current.get(id)
+      if (url) {
+        URL.revokeObjectURL(url)
+        inputUrls.current.delete(id)
+      }
+
+      // Every setState below is a plain call on a value computed here.  Nesting them
+      // inside the setSources updater would fire them twice under StrictMode for what
+      // is one edit -- the same trap the blob URLs above are avoiding.
+      const remaining = sources.filter((source) => source.id !== id)
+      const fallback = remaining[0]?.id ?? null
+
+      setSources(remaining)
+      // Both pointers have to land somewhere real.  An assemble card still naming the
+      // removed id keeps it on purpose: the card shows "(removed)" and the backend
+      // refuses the bake with a readable message, which beats silently repointing it at
+      // a different file and rendering something the user never asked for.
+      if (outputId === id) setOutputId(fallback)
+      if (editing === id) setEditing(fallback ?? MASTER)
+    },
+    [sources, outputId, editing],
+  )
+
+  // --- Chain helpers ----------------------------------------------------------------
+  // Column 2 edits ONE chain at a time, and that chain is either a source's or master's.
+  // This keeps every mutation below from having to branch on which.
+  const editChain = useCallback(
+    (id: ChainId, update: (steps: RecipeStep[]) => RecipeStep[]) => {
+      if (id === MASTER) {
+        setMaster(update)
+        return
+      }
+      setSources((current) =>
+        current.map((source) =>
+          source.id === id ? { ...source, recipe: update(source.recipe) } : source,
+        ),
+      )
+    },
+    [],
+  )
+
+  const setActiveUid = useCallback((id: ChainId, uid: string | null) => {
+    if (id === MASTER) {
+      setMasterActiveUid(uid)
+      return
+    }
+    setSources((current) =>
+      current.map((source) =>
+        source.id === id ? { ...source, activeUid: uid } : source,
+      ),
+    )
   }, [])
+
+  const editingSource = sources.find((source) => source.id === editing) ?? null
+  const recipe = editing === MASTER ? master : (editingSource?.recipe ?? [])
+  const activeUid = editing === MASTER ? masterActiveUid : (editingSource?.activeUid ?? null)
 
   // --- Bake -------------------------------------------------------------------------
   const bake = useCallback(async () => {
-    if (!fileId) return
-    if (recipe.length === 0) {
-      // An empty recipe is a no-op pipeline: show the Input panel, do not round-trip.
+    if (sources.length === 0 || !outputId) return
+
+    // An empty project is a no-op pipeline: show the Input panel, do not round-trip.
+    // Note this checks EVERY chain, not just the one on screen -- a source whose content
+    // arrives entirely via an assemble card elsewhere still has to be rendered.
+    const anySteps =
+      master.length > 0 || sources.some((source) => source.recipe.length > 0)
+    if (!anySteps) {
       inFlight.current?.abort()
       clearOutput()
       setStatus('Ready — add an operation to the recipe')
@@ -211,11 +311,30 @@ export default function App() {
       busyTimer.current = setTimeout(() => setShowBusy(true), BUSY_DELAY_MS)
     }
     try {
-      const result = await processRecipe(fileId, recipe, controller.signal)
+      // Editing a source that is NOT the output auditions that chain on its own, which
+      // is what anyone tweaking source 2's EQ expects to hear.  Editing master, or the
+      // output source itself, renders the finished project.
+      const rendered = editing === MASTER ? outputId : editing
+      const result = await processGraph(
+        {
+          sources: sources.map((source) => ({
+            id: source.id,
+            file_id: source.fileId,
+            recipe: toWire(source.recipe),
+          })),
+          master: toWire(master),
+          output_source: rendered,
+          apply_master: editing === MASTER || editing === outputId,
+        },
+        controller.signal,
+      )
       if (previousOutputUrl.current) URL.revokeObjectURL(previousOutputUrl.current)
       previousOutputUrl.current = result.url
       setOutput(result)
-      setStatus(`Baked in ${result.bakeMs.toFixed(0)} ms · ${result.duration.toFixed(2)}s out`)
+      setStatus(
+        `Baked in ${result.bakeMs.toFixed(0)} ms · ${result.duration.toFixed(2)}s out` +
+          (rendered !== outputId ? ` · auditioning ${editingSource?.filename ?? rendered}` : ''),
+      )
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return  // superseded
       setError(err instanceof Error ? err.message : 'Processing failed')
@@ -228,7 +347,7 @@ export default function App() {
         setShowBusy(false)
       }
     }
-  }, [fileId, recipe, clearOutput])
+  }, [sources, master, editing, outputId, editingSource, clearOutput])
 
   // --- Auto-Bake: debounce so dragging a slider does not fire a request per pixel ----
   useEffect(() => {
@@ -264,63 +383,116 @@ export default function App() {
   }, [paletteWidth, recipeWidth])
 
   // --- Recipe mutations -------------------------------------------------------------
-  const addOperation = useCallback((op: OperationDef, index?: number) => {
-    const step = newStep(op)
-    setRecipe((current) => {
-      const next = [...current]
-      next.splice(index ?? next.length, 0, step)
-      return next
-    })
-    // Adding an op with time parameters links it straight away, so its region is on the
-    // waveform without a second click.
-    if (op.id in REGION_OPS) setActiveUid(step.uid)
-  }, [])
+  // All of these act on the chain currently open in column 2.
+  const addOperation = useCallback(
+    (op: OperationDef, index?: number, chain: ChainId = editing) => {
+      const step = newStep(op)
+      editChain(chain, (current) => {
+        const next = [...current]
+        next.splice(index ?? next.length, 0, step)
+        return next
+      })
+      // Adding an op with time parameters links it straight away, so its region is on the
+      // waveform without a second click.
+      if (op.id in REGION_OPS) setActiveUid(chain, step.uid)
+    },
+    [editing, editChain, setActiveUid],
+  )
 
   const handleAdd = useCallback((op: OperationDef) => addOperation(op), [addOperation])
+
   const handleClear = useCallback(() => {
-    setRecipe([])
-    setActiveUid(null)
-  }, [])
+    editChain(editing, () => [])
+    setActiveUid(editing, null)
+  }, [editing, editChain, setActiveUid])
+
   const toggleAutoBake = useCallback(() => setAutoBake((value) => !value), [])
 
-  const updateParam = useCallback((uid: string, name: string, value: ParamValue) => {
-    setRecipe((current) =>
-      current.map((step) =>
-        step.uid === uid ? { ...step, params: { ...step.params, [name]: value } } : step,
-      ),
-    )
-  }, [])
+  const updateParam = useCallback(
+    (uid: string, name: string, value: ParamValue) => {
+      editChain(editing, (current) =>
+        current.map((step) =>
+          step.uid === uid ? { ...step, params: { ...step.params, [name]: value } } : step,
+        ),
+      )
+    },
+    [editing, editChain],
+  )
 
   /** Several parameters of one step in a SINGLE update.
    *
    *  A region drag moves start and end together; two updateParam calls would queue two
    *  renders and two Auto-Bake dependency changes for what is one edit. */
-  const updateParams = useCallback((uid: string, values: Record<string, ParamValue>) => {
-    setRecipe((current) =>
-      current.map((step) =>
-        step.uid === uid ? { ...step, params: { ...step.params, ...values } } : step,
-      ),
-    )
-  }, [])
+  const updateParams = useCallback(
+    (uid: string, values: Record<string, ParamValue>) => {
+      editChain(editing, (current) =>
+        current.map((step) =>
+          step.uid === uid ? { ...step, params: { ...step.params, ...values } } : step,
+        ),
+      )
+    },
+    [editing, editChain],
+  )
 
-  const toggleBypass = useCallback((uid: string) => {
-    setRecipe((current) =>
-      current.map((step) => (step.uid === uid ? { ...step, bypass: !step.bypass } : step)),
-    )
-  }, [])
+  const toggleBypass = useCallback(
+    (uid: string) => {
+      editChain(editing, (current) =>
+        current.map((step) => (step.uid === uid ? { ...step, bypass: !step.bypass } : step)),
+      )
+    },
+    [editing, editChain],
+  )
 
-  const removeStep = useCallback((uid: string) => {
-    setRecipe((current) => current.filter((step) => step.uid !== uid))
-    // Otherwise the region would keep pointing at a card that no longer exists.
-    setActiveUid((current) => (current === uid ? null : current))
-  }, [])
+  const removeStep = useCallback(
+    (uid: string) => {
+      editChain(editing, (current) => current.filter((step) => step.uid !== uid))
+      // Otherwise the region would keep pointing at a card that no longer exists.
+      if (activeUid === uid) setActiveUid(editing, null)
+    },
+    [editing, editChain, activeUid, setActiveUid],
+  )
+
+  const selectStep = useCallback(
+    (uid: string) => setActiveUid(editing, uid),
+    [editing, setActiveUid],
+  )
+
+  // --- What the tabs and the source dropdown see ------------------------------------
+  const tabs: ChainTab[] = useMemo(
+    () => [
+      ...sources.map((source) => ({
+        id: source.id,
+        label: source.filename,
+        steps: source.recipe.length,
+        isOutput: source.id === outputId,
+      })),
+      { id: MASTER, label: 'MASTER', steps: master.length, isOutput: false },
+    ],
+    [sources, outputId, master.length],
+  )
+
+  /** Everything an assemble card in THIS chain may point at.
+   *
+   *  The chain's own source is filtered out: a source referencing itself is always a
+   *  cycle, so offering it would only ever produce a backend error. */
+  const sourceOptions: SourceOption[] = useMemo(
+    () =>
+      sources
+        .filter((source) => source.id !== editing)
+        .map((source) => ({ id: source.id, label: source.filename })),
+    [sources, editing],
+  )
 
   // --- The waveform region, and the card it is bound to ------------------------------
   const activeStep = recipe.find((step) => step.uid === activeUid) ?? null
   const binding = activeStep ? REGION_OPS[activeStep.op] : undefined
+  // Master has no raw input of its own, so its regions are measured against the length
+  // of the last bake -- the only clock that chain has.
+  const regionDuration =
+    editing === MASTER ? (output?.duration ?? 0) : (editingSource?.duration ?? 0)
 
   const region: RegionSpec | null =
-    activeStep && binding && inputDuration > 0
+    activeStep && binding && regionDuration > 0
       ? {
           start: Number(activeStep.params[binding.start] ?? 0),
           // The editor reads `end <= 0` as "run to the end of the file", so a stored 0 is
@@ -328,7 +500,7 @@ export default function App() {
           end:
             Number(activeStep.params[binding.end] ?? 0) > 0
               ? Number(activeStep.params[binding.end])
-              : inputDuration,
+              : regionDuration,
           color: binding.color,
         }
       : null
@@ -350,25 +522,28 @@ export default function App() {
   const onDragEnd = useCallback(
     (result: DropResult) => {
       const { source, destination } = result
-      if (!destination || destination.droppableId !== 'recipe') return
+      // The droppable id carries its chain ("recipe:s2"), so a stale id from a previous
+      // tab can never be mistaken for the current one.
+      if (!destination || !destination.droppableId.startsWith('recipe:')) return
+      const chain = destination.droppableId.slice('recipe:'.length)
 
       if (source.droppableId === 'palette') {
         // Dragged in from column 1: the palette id is "palette-<operation id>".
         const opId = result.draggableId.replace(/^palette-/, '')
         const definition = operations.find((op) => op.id === opId)
-        if (definition) addOperation(definition, destination.index)
+        if (definition) addOperation(definition, destination.index, chain)
         return
       }
 
       // Reordering inside the recipe -- order changes the sound, so this is a real edit.
-      setRecipe((current) => {
+      editChain(chain, (current) => {
         const next = [...current]
         const [moved] = next.splice(source.index, 1)
         next.splice(destination.index, 0, moved)
         return next
       })
     },
-    [operations, addOperation],
+    [operations, addOperation, editChain],
   )
 
   // --- Dropping a WAV from the desktop ----------------------------------------------
@@ -395,14 +570,21 @@ export default function App() {
       event.preventDefault()
       dragDepth.current = 0
       setDropping(false)
-      const file = event.dataTransfer.files?.[0]
-      if (!file) return
-      const name = file.name.toLowerCase()
-      if (!ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))) {
+      // Several files at once is now a normal thing to do, so take all of them.
+      const files = Array.from(event.dataTransfer.files ?? [])
+      if (files.length === 0) return
+      const accepted = files.filter((file) =>
+        ACCEPTED_EXTENSIONS.some((ext) => file.name.toLowerCase().endsWith(ext)),
+      )
+      if (accepted.length === 0) {
         setError('Unsupported file type — try WAV, MP3, FLAC, OGG/Opus or AIFF.')
         return
       }
-      void handleFile(file)
+      // Sequentially: each upload mints the next source id off a ref.
+      void accepted.reduce(
+        (chain, file) => chain.then(() => handleFile(file)),
+        Promise.resolve(),
+      )
     },
     [handleFile],
   )
@@ -417,30 +599,74 @@ export default function App() {
   )
 
   // --- Export -----------------------------------------------------------------------
+  const outputSource = sources.find((source) => source.id === outputId) ?? null
+
   const exportWav = useCallback(() => {
     if (!output) return
     const link = document.createElement('a')
     link.href = output.url
-    // Strip whatever extension came in, not just .wav -- the output is always a WAV, so
-    // song.mp3 must not export as audio-chef-song.mp3.wav.
-    link.download = `audio-chef-${filename?.replace(/\.[^.]+$/, '') ?? 'output'}.wav`
+    // A project with several sources is a mix, not a processed copy of one file, so
+    // naming it after the output source alone would be misleading.
+    const stem =
+      sources.length > 1
+        ? 'mix'
+        // Strip whatever extension came in, not just .wav -- the output is always a WAV,
+        // so song.mp3 must not export as audio-chef-song.mp3.wav.
+        : (outputSource?.filename.replace(/\.[^.]+$/, '') ?? 'output')
+    link.download = `audio-chef-${stem}.wav`
     link.click()
-  }, [output, filename])
+  }, [output, sources.length, outputSource])
+
+  // --- Toolbar summary ---------------------------------------------------------------
+  const projectInfo =
+    sources.length === 0
+      ? null
+      : sources.length === 1
+        ? `${sources[0].duration.toFixed(2)}s · ${sources[0].sampleRate} Hz · ${sources[0].channels}ch`
+        : `${sources.length} sources · ${Math.max(...sources.map((s) => s.sampleRate))} Hz`
+
+  const hasAnySteps = master.length > 0 || sources.some((s) => s.recipe.length > 0)
+
+  /**
+   * The steps that produced the audio currently in the Output panel.
+   *
+   * Not the same as the chain on screen: the stats panel explains why the output looks
+   * the way it does, so it has to describe what actually ran -- the rendered source's
+   * own chain, followed by master when master was applied.
+   */
+  const renderedChain: RecipeStep[] = useMemo(() => {
+    const rendered = editing === MASTER ? outputId : editing
+    const base = sources.find((source) => source.id === rendered)?.recipe ?? []
+    const masterApplied = editing === MASTER || editing === outputId
+    return masterApplied ? [...base, ...master] : base
+  }, [sources, master, editing, outputId])
 
   return (
     <div className="flex h-screen flex-col bg-[var(--chef-bg)] text-[var(--chef-text)]">
       <Toolbar
-        filename={filename}
-        fileInfo={fileInfo}
+        filename={sources.length === 1 ? sources[0].filename : outputSource?.filename ?? null}
+        fileInfo={projectInfo}
         autoBake={autoBake}
         onToggleAutoBake={toggleAutoBake}
         onBake={bake}
         onExport={exportWav}
-        canBake={Boolean(fileId) && recipe.length > 0}
+        canBake={sources.length > 0 && hasAnySteps}
         canExport={Boolean(output)}
         busy={busy}
         status={status}
         error={error}
+      />
+
+      <SourcesRail
+        sources={sources}
+        editing={editing}
+        outputId={outputId}
+        accept={ACCEPT_ATTR}
+        onSelect={setEditing}
+        onSetOutput={setOutputId}
+        onRemove={removeSource}
+        onPick={onPickFile}
+        onRecord={handleFile}
       />
 
       <DragDropContext onDragEnd={onDragEnd}>
@@ -461,17 +687,24 @@ export default function App() {
             label="Operations column width"
           />
 
-          <Recipe
-            recipe={recipe}
-            operations={operations}
-            hasFile={Boolean(fileId)}
-            activeUid={activeUid}
-            onSelect={setActiveUid}
-            onParamChange={updateParam}
-            onToggleBypass={toggleBypass}
-            onRemove={removeStep}
-            onClear={handleClear}
-          />
+          {/* The source dropdown inside an assemble card reads this, at the leaf, so
+              adding or removing a file does not re-render the memoised columns. */}
+          <SourcesProvider value={sourceOptions}>
+            <Recipe
+              recipe={recipe}
+              operations={operations}
+              hasFile={sources.length > 0}
+              activeUid={activeUid}
+              tabs={tabs}
+              selected={editing}
+              onSelectTab={setEditing}
+              onSelect={selectStep}
+              onParamChange={updateParam}
+              onToggleBypass={toggleBypass}
+              onRemove={removeStep}
+              onClear={handleClear}
+            />
+          </SourcesProvider>
 
           <ColumnSplitter
             width={recipeWidth}
@@ -492,28 +725,20 @@ export default function App() {
               <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--chef-muted)]">
                 <span className="text-[var(--chef-accent-strong)]">3</span> · Listen
               </h2>
-              {inputUrl && (
-                <div className="ml-auto flex items-center gap-2">
-                  <Recorder onTake={handleFile} variant="compact" />
-                  <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-[var(--chef-border)] px-2.5 py-1 text-xs transition hover:border-[var(--chef-accent-strong)]">
-                    <Upload className="size-3.5" />
-                    Load another WAV
-                    <input
-                      type="file"
-                      accept={ACCEPT_ATTR}
-                      className="hidden"
-                      onChange={onPickFile}
-                    />
-                  </label>
-                </div>
-              )}
             </header>
 
-            {inputUrl ? (
+            {sources.length > 0 ? (
               <div className="space-y-4 p-4">
+                {/* On the MASTER tab there is no raw input of its own, so this falls back
+                    to the output source's file and says which one it is drawing -- the
+                    pre-master assembled mix would cost a second round trip per bake. */}
                 <WaveformViewer
-                  title="Input"
-                  url={inputUrl}
+                  title={
+                    editing === MASTER
+                      ? `Input — ${outputSource?.filename ?? 'output source'}`
+                      : `Input — ${editingSource?.filename ?? ''}`
+                  }
+                  url={(editing === MASTER ? outputSource : editingSource)?.url ?? null}
                   accent="#22c55e"
                   emptyHint=""
                   region={region}
@@ -531,16 +756,16 @@ export default function App() {
                   accent="#15803d"
                   busy={showBusy}
                   emptyHint={
-                    recipe.length === 0
-                      ? 'Add an operation to the recipe to hear a result'
-                      : 'Baking…'
+                    hasAnySteps
+                      ? 'Baking…'
+                      : 'Add an operation to the recipe to hear a result'
                   }
                 />
                 {/* The numbers behind the two pictures.  Always mounted: before the first
                     bake it explains itself rather than leaving the column half empty. */}
                 <ListenStats
                   stats={output?.stats ?? null}
-                  recipe={recipe}
+                  recipe={renderedChain}
                   operations={operations}
                   bakeMs={output?.bakeMs ?? 0}
                 />
@@ -557,10 +782,10 @@ export default function App() {
                   }`}
                 >
                   <ChefHat className="size-10 text-[var(--chef-accent-strong)]" />
-                  <span className="text-base font-medium">Drop a WAV here, or browse</span>
+                  <span className="text-base font-medium">Drop audio here, or browse</span>
                   <span className="text-xs leading-relaxed text-[var(--chef-muted)]">
-                    Then drag operations from column 1 into your recipe — they run top to
-                    bottom, and you hear the result as you tweak them.
+                    Load as many files as you like — each gets its own recipe, and an
+                    Assemble Clip step drops a piece of one into another.
                   </span>
                   <input
                     type="file"
@@ -584,9 +809,11 @@ export default function App() {
               </div>
             )}
 
-            {dropping && inputUrl && (
+            {dropping && sources.length > 0 && (
               <div className="pointer-events-none absolute inset-3 flex items-center justify-center rounded-xl border-2 border-dashed border-[var(--chef-accent-strong)] bg-[var(--chef-bg)]/85 text-sm text-[var(--chef-accent-strong)]">
-                Drop to replace the input
+                <span className="flex items-center gap-2">
+                  <Upload className="size-4" /> Drop to add another source
+                </span>
               </div>
             )}
           </section>

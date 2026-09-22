@@ -10,6 +10,7 @@ import numpy as np
 import soundfile as sf
 
 from . import config
+from .dsp.speed_pitch import resample
 
 
 def resolve_source(file_id: str) -> Path | None:
@@ -65,3 +66,43 @@ def load_audio_cached(path: Path) -> tuple[np.ndarray, int]:
 
     samples, samplerate = entry
     return samples.copy(), samplerate
+
+
+# --------------------------------------------------------------------------------------
+# Resampled-source cache.
+#
+# The cache above memoises the DECODE.  A multi-source project whose files disagree on
+# sample rate converts every off-rate source on the way in, and without a second cache a
+# slider drag would pay a whole-file np.interp per off-rate source, 3x a second.
+# --------------------------------------------------------------------------------------
+_RESAMPLE_CACHE_LIMIT = 8
+_resampled: "OrderedDict[tuple[str, int, int, int], np.ndarray]" = OrderedDict()
+
+
+def load_audio_at(path: Path, target_fs: int) -> tuple[np.ndarray, int]:
+    """The file's samples converted to `target_fs`, plus its own original rate.
+
+    Returning the original rate as well lets the caller report which sources were
+    converted, so a pitch change never goes unexplained in the UI.
+    """
+    samples, samplerate = load_audio_cached(path)
+    target_fs = int(target_fs)
+    if samplerate == target_fs:
+        return samples, samplerate          # already a fresh copy from load_audio_cached
+
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size, target_fs)
+
+    entry = _resampled.get(key)
+    if entry is None:
+        # resample(x, speed) returns floor(size / speed) samples, so this ratio is what
+        # holds the duration in SECONDS constant across the rate change.
+        entry = resample(samples, samplerate / target_fs)
+        _resampled[key] = entry
+        while len(_resampled) > _RESAMPLE_CACHE_LIMIT:
+            _resampled.popitem(last=False)
+    else:
+        _resampled.move_to_end(key)
+
+    # Same discipline as above: hand out a copy, never the cached array itself.
+    return entry.copy(), samplerate

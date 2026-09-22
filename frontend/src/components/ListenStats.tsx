@@ -136,6 +136,18 @@ function buildNotices(stats: BakeStats, recipe: RecipeStep[], operations: Operat
     })
   }
 
+  if (stats.resampled?.length) {
+    notices.push({
+      tone: 'info',
+      text:
+        `${stats.resampled.length === 1 ? 'One source was' : `${stats.resampled.length} sources were`} ` +
+        `recorded at a different sample rate and ${stats.resampled.length === 1 ? 'was' : 'were'} ` +
+        `converted to ${stats.project_sample_rate} Hz before anything else ran. A project has one ` +
+        `clock, and mixing buffers at two rates would have played one of them at the wrong speed ` +
+        `and pitch.`,
+    })
+  }
+
   if (stats.clipped > 0) {
     const over = (20 * Math.log10(stats.pre_clip_peak)).toFixed(1)
     notices.push({

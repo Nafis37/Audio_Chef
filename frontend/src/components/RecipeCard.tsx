@@ -18,6 +18,7 @@ import { GripVertical, Power, TriangleAlert, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { iconFor } from '../icons'
 import { REGION_OPS } from '../regions'
+import { useSources } from '../sources'
 import type { OperationDef, ParamDef, ParamValue, RecipeStep } from '../types'
 
 /** How often a dragged slider is allowed to push a value up into App's state. */
@@ -96,6 +97,53 @@ function useLiveValue(
   return [local, set] as const
 }
 
+/**
+ * The one control whose options come from the session rather than the backend schema.
+ *
+ * Its own component so that useSources() is called at the leaf: only the dropdowns
+ * re-render when a source is added or removed, not the card or the column around them.
+ */
+function SourceControl({
+  param,
+  value,
+  onChange,
+}: {
+  param: ParamDef
+  value: ParamValue
+  onChange: (name: string, value: ParamValue) => void
+}) {
+  const sources = useSources()
+  const current = String(value ?? '')
+  // A source can be removed while a card still points at it.  Say so rather than
+  // silently showing the first remaining source, which would misreport the recipe.
+  const dangling = current !== '' && !sources.some((source) => source.id === current)
+
+  return (
+    <label className="flex items-center justify-between gap-3 py-1 text-xs">
+      <span className="text-[var(--chef-muted)]">{param.label}</span>
+      <select
+        value={current}
+        onChange={(event) => onChange(param.name, event.target.value)}
+        className={`max-w-[60%] truncate rounded border bg-[var(--chef-inset)] px-2 py-1 text-xs outline-none focus:border-[var(--chef-accent-strong)] ${
+          current === '' || dangling
+            ? 'border-rose-500/60 text-rose-600'
+            : 'border-[var(--chef-border)] text-[var(--chef-text)]'
+        }`}
+      >
+        <option value="">
+          {sources.length === 0 ? 'Load another file first…' : 'Pick a source…'}
+        </option>
+        {dangling && <option value={current}>{current} (removed)</option>}
+        {sources.map((source) => (
+          <option key={source.id} value={source.id}>
+            {source.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
 /** Renders the right widget for one parameter, based on its `control` field. */
 function Control({
   param,
@@ -107,6 +155,12 @@ function Control({
   onChange: (name: string, value: ParamValue) => void
 }) {
   const [live, setLive] = useLiveValue(value, param.name, onChange)
+
+  // Straight through, unthrottled: picking a source is one discrete click, not a drag,
+  // and its options come from the session rather than from `param`.
+  if (param.control === 'source') {
+    return <SourceControl param={param} value={value} onChange={onChange} />
+  }
 
   if (param.control === 'toggle') {
     return (

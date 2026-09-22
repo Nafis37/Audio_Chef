@@ -46,4 +46,15 @@ export const REGION_OPS: Record<string, RegionBinding> = {
  * steps above it left it.  Once one of these runs first, the two clocks diverge and the
  * handles no longer mean what they appear to -- the card says so rather than lying.
  */
-export const TIME_SHIFTING_OPS = new Set(['editor', 'speed_pitch'])
+export const TIME_SHIFTING_OPS = new Set(['editor', 'speed_pitch', 'assemble'])
+
+/**
+ * Why `assemble` is in the set above but NOT in REGION_OPS.
+ *
+ * It definitely changes the duration -- every placement mode grows the buffer -- so the
+ * warning above applies to it like any other.  But its clip_start / clip_end name times
+ * inside a DIFFERENT file, and a region binding draws its handles on the waveform of the
+ * CURRENT one.  Binding it would put handles on the input that look like they edit what
+ * is under them and do not.  Typed seconds are honest until the Input viewer can follow
+ * a linked assemble card to the source it references.
+ */
