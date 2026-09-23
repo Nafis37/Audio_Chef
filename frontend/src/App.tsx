@@ -3,15 +3,15 @@
  *
  * This component owns all of the global state and wires the columns together:
  *
- *   Sources rail        every loaded file, plus which one is the project output
+ *   Tabs                one colour-coded, browser-style tab per loaded file
  *   Column 1  Operations Palette  (drag source)
- *   Column 2  The Recipe          (the chain belonging to the selected source, or MASTER)
- *   Column 3  Input / Output      (two Wavesurfer views)
+ *   Column 2  The Recipe          (the open tab's chain)
+ *   Column 3  Input / Output      (two Wavesurfer views of the open tab)
  *
- * A project is a SET of sources, each with its own recipe, plus a master recipe that runs
- * over whichever source is designated the output.  An `assemble` card inside one chain
- * pulls in another source's processed audio, so the chains form a graph; the backend
- * walks it in dsp/graph.py.
+ * Every file is its own tab with its own recipe: open a tab, build its recipe, hear it,
+ * save it, close it.  Tabs are independent -- an `assemble` card can still pull a piece of
+ * another file's processed audio into this one, and the backend walks that in
+ * dsp/graph.py.
  *
  * Data flow:
  *   1. the tool catalogue is fetched once from GET /operations
@@ -37,18 +37,17 @@ import { fetchOperations, fetchSpectrogram, processGraph, toWire, uploadFile } f
 import { ColumnSplitter } from './components/ColumnSplitter'
 import { ListenStats } from './components/ListenStats'
 import { OperationsPalette } from './components/OperationsPalette'
-import { Recipe, type ChainTab } from './components/Recipe'
+import { Recipe } from './components/Recipe'
 import { Recorder } from './components/Recorder'
-import { SourcesRail } from './components/SourcesRail'
+import { SourceTabs } from './components/SourceTabs'
 import { Toolbar } from './components/Toolbar'
 import { WaveformViewer, type RegionSpec, type WaveformHandle } from './components/WaveformViewer'
+import { sourceColor } from './colors'
 import type { Preset } from './presets'
 import { regionFor } from './regions'
 import { SourcesProvider, type SourceOption } from './sources'
 import {
-  MASTER,
   type BakeResult,
-  type ChainId,
   type OperationDef,
   type ParamValue,
   type RecipeStep,
@@ -124,16 +123,8 @@ export default function App() {
 
   // --- The project ------------------------------------------------------------------
   const [sources, setSources] = useState<Source[]>([])
-  const [master, setMaster] = useState<RecipeStep[]>([])
-  const [masterActiveUid, setMasterActiveUid] = useState<string | null>(null)
-  /** Which chain column 2 is editing.  A source id, or MASTER. */
-  const [editing, setEditing] = useState<ChainId>(MASTER)
-  /**
-   * Whose processed chain feeds master and what Export renders.  Kept separate from
-   * `editing` on purpose: Export needs a stable answer to "what is this project's
-   * output" regardless of which tab happens to be open at the time.
-   */
-  const [outputId, setOutputId] = useState<string | null>(null)
+  /** The open tab: whose recipe column 2 edits and whose audio column 3 plays. */
+  const [editing, setEditing] = useState<string | null>(null)
 
   const [output, setOutput] = useState<BakeResult | null>(null)
 
@@ -213,7 +204,8 @@ export default function App() {
     setStatus('Uploading…')
     try {
       const info = await uploadFile(file)
-      const id = `s${nextSourceId.current++}`
+      const serial = nextSourceId.current++
+      const id = `s${serial}`
 
       const url = URL.createObjectURL(file)   // the input waveform is drawn locally
       inputUrls.current.set(id, url)
@@ -222,6 +214,7 @@ export default function App() {
         ...current,
         {
           id,
+          color: sourceColor(serial),
           fileId: info.file_id,
           filename: info.filename,
           url,
@@ -232,10 +225,8 @@ export default function App() {
           activeUid: null,
         },
       ])
-      // The first file becomes the output and the edited chain, so a one-file project
-      // behaves exactly as it did before any of this existed.
-      setOutputId((current) => current ?? id)
-      setEditing((current) => (current === MASTER && sources.length === 0 ? id : current))
+      // Opening a file opens its tab, as a browser does with a new page.
+      setEditing(id)
 
       // The input spectrogram is a nicety: if it fails the waveform is still there.
       fetchSpectrogram('file', info.file_id)
@@ -247,7 +238,7 @@ export default function App() {
       setError(err instanceof Error ? err.message : 'Upload failed')
       setStatus('')
     }
-  }, [sources.length])
+  }, [])
 
   const removeSource = useCallback(
     (id: string) => {
@@ -262,8 +253,11 @@ export default function App() {
       // Every setState below is a plain call on a value computed here.  Nesting them
       // inside the setSources updater would fire them twice under StrictMode for what
       // is one edit -- the same trap the blob URLs above are avoiding.
+      const index = sources.findIndex((source) => source.id === id)
       const remaining = sources.filter((source) => source.id !== id)
-      const fallback = remaining[0]?.id ?? null
+      // Closing the open tab opens its right-hand neighbour, else the left one -- the
+      // tab that slides under the pointer, as in a browser.
+      const fallback = remaining[Math.min(index, remaining.length - 1)]?.id ?? null
 
       setSources(remaining)
       setInputSpectrograms((current) => {
@@ -271,25 +265,19 @@ export default function App() {
         next.delete(id)
         return next
       })
-      // Both pointers have to land somewhere real.  An assemble card still naming the
-      // removed id keeps it on purpose: the card shows "(removed)" and the backend
-      // refuses the bake with a readable message, which beats silently repointing it at
-      // a different file and rendering something the user never asked for.
-      if (outputId === id) setOutputId(fallback)
-      if (editing === id) setEditing(fallback ?? MASTER)
+      // An assemble card still naming the closed tab keeps the id on purpose: the card
+      // shows "(removed)" and the backend refuses the bake with a readable message, which
+      // beats silently repointing it at a different file.
+      if (editing === id) setEditing(fallback)
+      if (remaining.length === 0) clearOutput()
     },
-    [sources, outputId, editing],
+    [sources, editing, clearOutput],
   )
 
   // --- Chain helpers ----------------------------------------------------------------
-  // Column 2 edits ONE chain at a time, and that chain is either a source's or master's.
-  // This keeps every mutation below from having to branch on which.
+  // Column 2 edits ONE tab's chain at a time; every mutation below goes through these.
   const editChain = useCallback(
-    (id: ChainId, update: (steps: RecipeStep[]) => RecipeStep[]) => {
-      if (id === MASTER) {
-        setMaster(update)
-        return
-      }
+    (id: string | null, update: (steps: RecipeStep[]) => RecipeStep[]) => {
       setSources((current) =>
         current.map((source) =>
           source.id === id ? { ...source, recipe: update(source.recipe) } : source,
@@ -299,11 +287,7 @@ export default function App() {
     [],
   )
 
-  const setActiveUid = useCallback((id: ChainId, uid: string | null) => {
-    if (id === MASTER) {
-      setMasterActiveUid(uid)
-      return
-    }
+  const setActiveUid = useCallback((id: string | null, uid: string | null) => {
     setSources((current) =>
       current.map((source) =>
         source.id === id ? { ...source, activeUid: uid } : source,
@@ -312,19 +296,31 @@ export default function App() {
   }, [])
 
   const editingSource = sources.find((source) => source.id === editing) ?? null
-  const recipe = editing === MASTER ? master : (editingSource?.recipe ?? [])
-  const activeUid = editing === MASTER ? masterActiveUid : (editingSource?.activeUid ?? null)
+  const recipe = useMemo(() => editingSource?.recipe ?? [], [editingSource])
+  const activeUid = editingSource?.activeUid ?? null
 
   // --- Bake -------------------------------------------------------------------------
-  const bake = useCallback(async () => {
-    if (sources.length === 0 || !outputId) return
+  /** The request that renders one tab: its file through its own recipe, nothing else. */
+  const renderRequest = useCallback(
+    (id: string) => ({
+      sources: sources.map((source) => ({
+        id: source.id,
+        file_id: source.fileId,
+        recipe: toWire(source.recipe),
+      })),
+      // No shared final chain: every tab stands on its own.
+      master: [],
+      output_source: id,
+      apply_master: false,
+    }),
+    [sources],
+  )
 
-    // An empty project is a no-op pipeline: show the Input panel, do not round-trip.
-    // Note this checks EVERY chain, not just the one on screen -- a source whose content
-    // arrives entirely via an assemble card elsewhere still has to be rendered.
-    const anySteps =
-      master.length > 0 || sources.some((source) => source.recipe.length > 0)
-    if (!anySteps) {
+  const bake = useCallback(async () => {
+    if (!editing) return
+
+    // An empty recipe is a no-op pipeline: show the Input panel, do not round-trip.
+    if (recipe.length === 0) {
       inFlight.current?.abort()
       clearOutput()
       setStatus('Ready — add an operation to the recipe')
@@ -341,30 +337,11 @@ export default function App() {
       busyTimer.current = setTimeout(() => setShowBusy(true), BUSY_DELAY_MS)
     }
     try {
-      // Editing a source that is NOT the output auditions that chain on its own, which
-      // is what anyone tweaking source 2's EQ expects to hear.  Editing master, or the
-      // output source itself, renders the finished project.
-      const rendered = editing === MASTER ? outputId : editing
-      const result = await processGraph(
-        {
-          sources: sources.map((source) => ({
-            id: source.id,
-            file_id: source.fileId,
-            recipe: toWire(source.recipe),
-          })),
-          master: toWire(master),
-          output_source: rendered,
-          apply_master: editing === MASTER || editing === outputId,
-        },
-        controller.signal,
-      )
+      const result = await processGraph(renderRequest(editing), controller.signal)
       if (previousOutputUrl.current) URL.revokeObjectURL(previousOutputUrl.current)
       previousOutputUrl.current = result.url
       setOutput(result)
-      setStatus(
-        `Baked in ${result.bakeMs.toFixed(0)} ms · ${result.duration.toFixed(2)}s out` +
-          (rendered !== outputId ? ` · auditioning ${editingSource?.filename ?? rendered}` : ''),
-      )
+      setStatus(`Baked in ${result.bakeMs.toFixed(0)} ms · ${result.duration.toFixed(2)}s out`)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return  // superseded
       setError(err instanceof Error ? err.message : 'Processing failed')
@@ -377,7 +354,7 @@ export default function App() {
         setShowBusy(false)
       }
     }
-  }, [sources, master, editing, outputId, editingSource, clearOutput])
+  }, [editing, recipe, renderRequest, clearOutput])
 
   // --- The output spectrogram follows each bake ------------------------------------
   const bakeId = output?.bakeId ?? null
@@ -483,7 +460,7 @@ export default function App() {
   // --- Recipe mutations -------------------------------------------------------------
   // All of these act on the chain currently open in column 2.
   const addOperation = useCallback(
-    (op: OperationDef, index?: number, chain: ChainId = editing) => {
+    (op: OperationDef, index?: number, chain: string | null = editing) => {
       const step = newStep(op)
       editChain(chain, (current) => {
         const next = [...current]
@@ -574,20 +551,7 @@ export default function App() {
     [editing, setActiveUid],
   )
 
-  // --- What the tabs and the source dropdown see ------------------------------------
-  const tabs: ChainTab[] = useMemo(
-    () => [
-      ...sources.map((source) => ({
-        id: source.id,
-        label: source.filename,
-        steps: source.recipe.length,
-        isOutput: source.id === outputId,
-      })),
-      { id: MASTER, label: 'MASTER', steps: master.length, isOutput: false },
-    ],
-    [sources, outputId, master.length],
-  )
-
+  // --- What the source dropdown sees ----------------------------------------------
   /** Everything an assemble / voice_match card in THIS chain may point at.
    *
    *  The chain's own source is filtered out: a source referencing itself is always a
@@ -604,10 +568,7 @@ export default function App() {
   const activeStep = recipe.find((step) => step.uid === activeUid) ?? null
   // regionFor() also asks whether the step's current mode uses a region at all.
   const binding = activeStep ? regionFor(activeStep.op, activeStep.params) : undefined
-  // Master has no raw input of its own, so its regions are measured against the length
-  // of the last bake -- the only clock that chain has.
-  const regionDuration =
-    editing === MASTER ? (output?.duration ?? 0) : (editingSource?.duration ?? 0)
+  const regionDuration = editingSource?.duration ?? 0
 
   const region: RegionSpec | null =
     activeStep && binding && regionDuration > 0
@@ -716,73 +677,71 @@ export default function App() {
     [handleFile],
   )
 
-  // --- Export -----------------------------------------------------------------------
-  const outputSource = sources.find((source) => source.id === outputId) ?? null
+  // --- Save a tab -------------------------------------------------------------------
+  /**
+   * Downloads one tab's file run through its own recipe, as a WAV.
+   *
+   * Always rendered afresh rather than reusing the Output panel's blob: for a moment after
+   * a tab switch (the Auto-Bake debounce) that blob still holds the PREVIOUS tab, and a
+   * save must never hand over the wrong file.  The one-off blob is released right after.
+   */
+  const saveSource = useCallback(
+    async (id: string) => {
+      const source = sources.find((s) => s.id === id)
+      if (!source) return
+      let url: string
+      try {
+        url = (await processGraph(renderRequest(id))).url
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Save failed')
+        return
+      }
+      const link = document.createElement('a')
+      link.href = url
+      // Strip whatever extension came in, not just .wav -- the output is always a WAV,
+      // so song.mp3 must not save as audio-chef-song.mp3.wav.
+      link.download = `audio-chef-${source.filename.replace(/\.[^.]+$/, '')}.wav`
+      link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    },
+    [sources, renderRequest],
+  )
 
   const exportWav = useCallback(() => {
-    if (!output) return
-    const link = document.createElement('a')
-    link.href = output.url
-    // A project with several sources is a mix, not a processed copy of one file, so
-    // naming it after the output source alone would be misleading.
-    const stem =
-      sources.length > 1
-        ? 'mix'
-        // Strip whatever extension came in, not just .wav -- the output is always a WAV,
-        // so song.mp3 must not export as audio-chef-song.mp3.wav.
-        : (outputSource?.filename.replace(/\.[^.]+$/, '') ?? 'output')
-    link.download = `audio-chef-${stem}.wav`
-    link.click()
-  }, [output, sources.length, outputSource])
+    if (editing) void saveSource(editing)
+  }, [editing, saveSource])
 
   // --- Toolbar summary ---------------------------------------------------------------
-  const projectInfo =
-    sources.length === 0
-      ? null
-      : sources.length === 1
-        ? `${sources[0].duration.toFixed(2)}s · ${sources[0].sampleRate} Hz · ${sources[0].channels}ch`
-        : `${sources.length} sources · ${Math.max(...sources.map((s) => s.sampleRate))} Hz`
+  const projectInfo = editingSource
+    ? `${editingSource.duration.toFixed(2)}s · ${editingSource.sampleRate} Hz · ${editingSource.channels}ch` +
+      (sources.length > 1 ? ` · ${sources.length} tabs` : '')
+    : null
 
-  const hasAnySteps = master.length > 0 || sources.some((s) => s.recipe.length > 0)
-
-  /**
-   * The steps that produced the audio currently in the Output panel.
-   *
-   * Not the same as the chain on screen: the stats panel explains why the output looks
-   * the way it does, so it has to describe what actually ran -- the rendered source's
-   * own chain, followed by master when master was applied.
-   */
-  const renderedChain: RecipeStep[] = useMemo(() => {
-    const rendered = editing === MASTER ? outputId : editing
-    const base = sources.find((source) => source.id === rendered)?.recipe ?? []
-    const masterApplied = editing === MASTER || editing === outputId
-    return masterApplied ? [...base, ...master] : base
-  }, [sources, master, editing, outputId])
+  const hasAnySteps = recipe.length > 0
 
   return (
     <div className="flex h-screen flex-col bg-[var(--chef-bg)] text-[var(--chef-text)]">
       <Toolbar
-        filename={sources.length === 1 ? sources[0].filename : outputSource?.filename ?? null}
+        filename={editingSource?.filename ?? null}
         fileInfo={projectInfo}
         autoBake={autoBake}
         onToggleAutoBake={toggleAutoBake}
         onBake={bake}
         onExport={exportWav}
         canBake={sources.length > 0 && hasAnySteps}
-        canExport={Boolean(output)}
+        canExport={Boolean(editingSource)}
         busy={busy}
         status={status}
         error={error}
       />
 
-      <SourcesRail
+      <SourceTabs
         sources={sources}
-        editing={editing}
-        outputId={outputId}
+        activeId={editing}
         accept={ACCEPT_ATTR}
         onSelect={setEditing}
-        onSetOutput={setOutputId}
-        onRemove={removeSource}
+        onSave={saveSource}
+        onClose={removeSource}
         onPick={onPickFile}
         onRecord={handleFile}
       />
@@ -813,9 +772,9 @@ export default function App() {
               operations={operations}
               hasFile={sources.length > 0}
               activeUid={activeUid}
-              tabs={tabs}
-              selected={editing}
-              onSelectTab={setEditing}
+              selected={editing ?? ''}
+              tabName={editingSource?.filename ?? ''}
+              tabColor={editingSource?.color ?? 'transparent'}
               onSelect={selectStep}
               onParamChange={updateParam}
               onParamsChange={updateParams}
@@ -883,24 +842,15 @@ export default function App() {
                   </span>
                 </div>
 
-                {/* On the MASTER tab there is no raw input of its own, so this falls back
-                    to the output source's file and says which one it is drawing -- the
-                    pre-master assembled mix would cost a second round trip per bake. */}
                 <WaveformViewer
-                  title={
-                    editing === MASTER
-                      ? `Input — ${outputSource?.filename ?? 'output source'}`
-                      : `Input — ${editingSource?.filename ?? ''}`
-                  }
-                  url={(editing === MASTER ? outputSource : editingSource)?.url ?? null}
+                  title={`Input — ${editingSource?.filename ?? ''}`}
+                  url={editingSource?.url ?? null}
                   accent="#22c55e"
                   emptyHint=""
                   region={region}
                   onRegionChange={onRegionChange}
                   ref={inputView}
-                  spectrogram={
-                    inputSpectrograms.get((editing === MASTER ? outputId : editing) ?? '') ?? null
-                  }
+                  spectrogram={inputSpectrograms.get(editing ?? '') ?? null}
                   highlighted={hearing === 'input'}
                   onPlay={onInputPlay}
                 >
@@ -929,7 +879,7 @@ export default function App() {
                     bake it explains itself rather than leaving the column half empty. */}
                 <ListenStats
                   stats={output?.stats ?? null}
-                  recipe={renderedChain}
+                  recipe={recipe}
                   operations={operations}
                   bakeMs={output?.bakeMs ?? 0}
                 />
@@ -948,8 +898,8 @@ export default function App() {
                   <ChefHat className="size-10 text-[var(--chef-accent-strong)]" />
                   <span className="text-base font-medium">Drop audio here, or browse</span>
                   <span className="text-xs leading-relaxed text-[var(--chef-muted)]">
-                    Load as many files as you like — each gets its own recipe, and an
-                    Assemble Clip step drops a piece of one into another.
+                    Load as many files as you like — each opens in its own tab with its
+                    own recipe, ready to hear, save and close.
                   </span>
                   <input
                     type="file"
@@ -976,7 +926,7 @@ export default function App() {
             {dropping && sources.length > 0 && (
               <div className="pointer-events-none absolute inset-3 flex items-center justify-center rounded-xl border-2 border-dashed border-[var(--chef-accent-strong)] bg-[var(--chef-bg)]/85 text-sm text-[var(--chef-accent-strong)]">
                 <span className="flex items-center gap-2">
-                  <Upload className="size-4" /> Drop to add another source
+                  <Upload className="size-4" /> Drop to open it in a new tab
                 </span>
               </div>
             )}

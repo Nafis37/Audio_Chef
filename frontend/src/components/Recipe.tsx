@@ -20,16 +20,7 @@ import { memo, useMemo } from 'react'
 import { RecipeCard } from './RecipeCard'
 import { PRESETS, type Preset } from '../presets'
 import { TIME_SHIFTING_OPS } from '../regions'
-import { MASTER, type ChainId, type OperationDef, type ParamValue, type RecipeStep } from '../types'
-
-export interface ChainTab {
-  id: ChainId
-  label: string
-  /** How many live steps this chain holds -- shown as a count on the chip. */
-  steps: number
-  /** This chain's output is what Export renders.  Only ever one. */
-  isOutput: boolean
-}
+import type { OperationDef, ParamValue, RecipeStep } from '../types'
 
 interface Props {
   recipe: RecipeStep[]
@@ -37,11 +28,11 @@ interface Props {
   hasFile: boolean
   /** uid of the step whose region is drawn on the Input waveform, if any. */
   activeUid: string | null
-  /** One chip per source plus MASTER. */
-  tabs: ChainTab[]
-  /** Which chain the `recipe` above belongs to. */
-  selected: ChainId
-  onSelectTab: (id: ChainId) => void
+  /** Which tab (source id) the `recipe` above belongs to. */
+  selected: string
+  /** That tab's file and colour, repeated in the header so you know what you are editing. */
+  tabName: string
+  tabColor: string
   onSelect: (uid: string) => void
   onParamChange: (uid: string, name: string, value: ParamValue) => void
   onParamsChange: (uid: string, values: Record<string, ParamValue>) => void
@@ -57,9 +48,9 @@ function RecipeImpl({
   operations,
   hasFile,
   activeUid,
-  tabs,
   selected,
-  onSelectTab,
+  tabName,
+  tabColor,
   onSelect,
   onParamChange,
   onParamsChange,
@@ -74,8 +65,23 @@ function RecipeImpl({
   return (
     <section className="flex h-full min-h-0 flex-col border-r border-[var(--chef-border)] bg-[var(--chef-panel)]">
       <header className="flex items-center justify-between border-b border-[var(--chef-border)] px-4 py-3">
-        <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--chef-muted)]">
-          <span className="text-[var(--chef-accent-strong)]">2</span> · Recipe
+        <h2 className="flex min-w-0 items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--chef-muted)]">
+          <span className="shrink-0">
+            <span className="text-[var(--chef-accent-strong)]">2</span> · Recipe
+          </span>
+          {tabName && (
+            <span
+              className="flex min-w-0 items-center gap-1.5 normal-case tracking-normal text-[var(--chef-text)]"
+              title={`Editing ${tabName}`}
+            >
+              <span
+                className="size-2 shrink-0 rounded-full"
+                style={{ backgroundColor: tabColor }}
+                aria-hidden
+              />
+              <span className="truncate font-medium">{tabName}</span>
+            </span>
+          )}
         </h2>
         <div className="flex items-center gap-1">
           {/* A select that always shows its placeholder: picking an entry is an action,
@@ -109,38 +115,6 @@ function RecipeImpl({
           </button>
         </div>
       </header>
-
-      {/* One chip per source plus MASTER.  Each source carries its own chain, so this is
-          what makes "EQ the vocals, compress the drums" expressible at all. */}
-      {tabs.length > 0 && (
-        <div className="flex flex-wrap gap-1 border-b border-[var(--chef-border)] px-3 py-2">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => onSelectTab(tab.id)}
-              title={tab.id === MASTER ? 'Runs over the finished mix' : `Recipe for ${tab.label}`}
-              className={`flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition ${
-                tab.id === selected
-                  ? 'border-[var(--chef-accent-strong)] bg-[var(--chef-accent)]/25 text-[var(--chef-accent-strong)]'
-                  : 'border-[var(--chef-border)] text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
-              }`}
-            >
-              {tab.isOutput && (
-                <span title="This source is what Export renders" className="text-amber-500">
-                  ★
-                </span>
-              )}
-              <span className="truncate">
-                {tab.id === MASTER ? 'MASTER' : tab.label}
-              </span>
-              {tab.steps > 0 && (
-                <span className="font-mono opacity-60">{tab.steps}</span>
-              )}
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* The scroller holds the droppable AND the empty state, so column 2 still scrolls
           as one surface even though only the first of the two accepts drops. */}
@@ -208,9 +182,7 @@ function RecipeImpl({
                   Pick an operation on the left
                 </p>
                 <p className="mt-1 text-xs text-[var(--chef-muted)]">
-                  {selected === MASTER
-                    ? 'Steps here run over the finished mix, after every source chain.'
-                    : 'Click it or drag it here. Steps run top to bottom, on this source only.'}
+                  Click it or drag it here. Steps run top to bottom, on this file only.
                 </p>
               </>
             ) : (

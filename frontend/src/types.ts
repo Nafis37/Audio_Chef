@@ -98,6 +98,8 @@ export interface UploadInfo {
 export interface Source {
   /** Client-minted handle ("s1").  What an `assemble` card's `source` param stores. */
   id: string
+  /** The tab's colour (colors.ts), fixed for the life of the source. */
+  color: string
   /** Distinct from `id`: the same upload may be loaded twice with two different chains. */
   fileId: string
   filename: string
@@ -111,10 +113,6 @@ export interface Source {
   /** uid of the step whose region is drawn, if any.  Per source, not global. */
   activeUid: string | null
 }
-
-/** Which chain column 2 is editing: a source id, or the master chain. */
-export type ChainId = string
-export const MASTER: ChainId = 'master'
 
 /** The body of POST /process. */
 export interface ProcessGraphRequest {
