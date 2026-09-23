@@ -11,12 +11,11 @@
  *      measured in numpy by backend/app/dsp/analysis.py and delivered on the same
  *      response as the audio (the X-Bake-Stats header), so there is no second decode and
  *      the figures describe the exact buffer the DSP ran on.
- *   2. WHY IT LOOKS LIKE THIS -- one equation per active step (see explain.ts) plus the
- *      notices for things the engine otherwise does silently: clipping at +-1, a recipe
- *      that emptied the buffer, a duration or loudness that moved.
+ *   2. WHY IT LOOKS LIKE THIS -- notices for things the engine otherwise does silently:
+ *      clipping at +-1, a recipe that emptied the buffer, a duration or loudness that moved.
  *
- * The table and the maths are folded into <details>: the sentence and the notices are
- * what a demo audience reads; the rest is one click away for whoever asks "how?".
+ * The table is folded into <details>: the sentence and the notices are what a demo
+ * audience reads; the rest is one click away for whoever asks "how?".
  *
  * Presentational only: every number arrives as a prop.
  */
@@ -24,7 +23,6 @@
 import { memo } from 'react'
 import { AlertTriangle, Info } from 'lucide-react'
 
-import { explainStep } from '../explain'
 import { TIME_SHIFTING_OPS } from '../regions'
 import type { BakeStats, Measures, OperationDef, RecipeStep } from '../types'
 
@@ -289,8 +287,6 @@ function buildNotices(stats: BakeStats, recipe: RecipeStep[], operations: Operat
 }
 
 function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
-  const active = recipe.filter((step) => !step.bypass)
-
   return (
     <section className="rounded-lg border border-[var(--chef-border)] bg-[var(--chef-panel)]">
       <header className="flex items-center gap-3 border-b border-[var(--chef-border)] px-4 py-2.5">
@@ -307,7 +303,7 @@ function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
       {!stats ? (
         <p className="px-4 pb-4 pt-3.5 text-xs leading-relaxed text-[var(--chef-muted)]">
           Add an operation to the recipe and Audio Chef will measure the input against the
-          output here, and show the equation each step applied.
+          output here.
         </p>
       ) : (
         <div className="space-y-4 px-4 pb-4 pt-3.5">
@@ -367,42 +363,6 @@ function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
             </p>
           ))}
 
-          {/* --- 3. The maths, one line per step that actually ran ------------------- */}
-          {active.length > 0 && (
-            <details className="space-y-2.5 border-t border-[var(--chef-border)] pt-3">
-              <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wider text-[var(--chef-muted)] hover:text-[var(--chef-text)]">
-                The maths, step by step
-              </summary>
-              {active.map((step, index) => {
-                const op = operations.find((candidate) => candidate.id === step.op)
-                if (!op) return null
-                const explanation = explainStep(op, step, stats.sample_rate)
-                return (
-                  <div key={step.uid} className="space-y-1">
-                    <div className="flex items-baseline gap-2">
-                      <span className="font-mono text-[10px] text-[var(--chef-accent-strong)]">
-                        {index + 1}
-                      </span>
-                      <span className="text-xs font-medium">{op.label}</span>
-                      <span className="text-[11px] text-[var(--chef-muted)]">— {op.how}</span>
-                    </div>
-                    {explanation && (
-                      <>
-                        {/* Long equations scroll inside their own box rather than
-                            widening the column. */}
-                        <p className="overflow-x-auto rounded bg-[var(--chef-inset)] px-2 py-1.5 font-mono text-[11px] whitespace-nowrap">
-                          {explanation.equation}
-                        </p>
-                        <p className="text-[11px] leading-relaxed text-[var(--chef-muted)]">
-                          {explanation.effect}
-                        </p>
-                      </>
-                    )}
-                  </div>
-                )
-              })}
-            </details>
-          )}
         </div>
       )}
     </section>
