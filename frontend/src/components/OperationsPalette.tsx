@@ -8,9 +8,8 @@
  *
  * There is no search box: every entry fits on screen at once, so filtering them was
  * a control that cost more attention than it saved.  Instead the entries are grouped under
- * their `category` heading and each carries its one-line `summary`, so "what does this
- * do?" is answered before anything is dragged.  Ops marked `hidden` (kept only so old
- * recipes still bake) are not offered.
+ * their `category` heading.  Ops marked `hidden` (kept only so old recipes still bake)
+ * are not offered.
  *
  * The headings sit INSIDE the droppable but are not Draggables, which dnd allows; the
  * Draggable indexes still count 0..n-1 over the visible ops only, and renderClone looks
@@ -80,9 +79,6 @@ function PaletteItem({ op, drag, isDragging, onAdd }: ItemProps) {
         <Icon className="size-4 shrink-0 text-[var(--chef-accent-strong)]" />
         <span className="text-sm font-medium">{op.label}</span>
       </div>
-      <p className="mt-1 pl-[1.625rem] text-[11px] leading-snug text-[var(--chef-muted)]">
-        {op.summary}
-      </p>
     </div>
   )
 }

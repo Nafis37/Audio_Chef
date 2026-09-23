@@ -1,7 +1,7 @@
 /**
  * Which operations have time parameters, and therefore a draggable region.
  *
- * Two of the ops select a span of the audio by seconds.  Typing those seconds blind
+ * Some of the ops select a span of the audio by seconds.  Typing those seconds blind
  * is the thing this table exists to remove: the linked card's numbers and the handles on
  * the Input waveform are two views of the same pair of parameters.
  *
@@ -50,6 +50,15 @@ export const REGION_OPS: Record<string, RegionBinding> = {
     // "Automatically" needs no region; only "From a part I mark" does.
     when: (params) => params.profile === 'region',
   },
+  // The span Reverse plays backwards.  Violet: not the green of a cut -- nothing is
+  // removed, only turned around.
+  reverse: {
+    start: 'start',
+    end: 'end',
+    color: 'rgba(139, 92, 246, 0.22)',
+    label: 'Reversed part',
+    when: (params) => params.mode === 'selection',
+  },
 }
 
 /**
@@ -59,7 +68,7 @@ export const REGION_OPS: Record<string, RegionBinding> = {
  * steps above it left it.  Once one of these runs first, the two clocks diverge and the
  * handles no longer mean what they appear to -- the card says so rather than lying.
  */
-export const TIME_SHIFTING_OPS = new Set(['editor', 'speed_pitch', 'assemble'])
+export const TIME_SHIFTING_OPS = new Set(['editor', 'speed_pitch', 'assemble', 'silence_remover'])
 
 /**
  * Why `assemble` is in the set above but NOT in REGION_OPS.

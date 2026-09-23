@@ -25,6 +25,13 @@ def load_audio(path: Path) -> tuple[np.ndarray, int]:
     return np.ascontiguousarray(mono), int(samplerate)
 
 
+def load_channels(path: Path) -> tuple[np.ndarray, int]:
+    """Every channel, unfolded: (frames, channels).  Only Signal Doctor's stereo check
+    needs this -- everything else processes the mono fold from load_audio()."""
+    data, samplerate = sf.read(str(path), dtype="float64", always_2d=True)
+    return data, int(samplerate)
+
+
 def probe(path: Path) -> dict:
     """Metadata for the frontend without decoding the whole file into the response."""
     info = sf.info(str(path))

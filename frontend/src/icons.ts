@@ -5,7 +5,9 @@
  */
 
 import {
+  Activity,
   AudioLines,
+  BarChart3,
   Filter,
   Gauge,
   Layers,
@@ -14,7 +16,9 @@ import {
   Repeat,
   Scissors,
   SlidersHorizontal,
+  Undo2,
   UsersRound,
+  VolumeX,
   Wand2,
   Waves,
   type LucideIcon,
@@ -32,6 +36,10 @@ const ICONS: Record<string, LucideIcon> = {
   Layers,
   Repeat,
   UsersRound,
+  Activity,
+  BarChart3,
+  Undo2,
+  VolumeX,
 }
 
 /** Falls back to a generic wand for any icon name we do not know about yet. */

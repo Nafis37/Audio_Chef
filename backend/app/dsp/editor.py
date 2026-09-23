@@ -8,6 +8,10 @@ Pure time-domain array operation: numpy slicing and concatenation, nothing more.
 
     trim(start, end)   -> keep   x[start_sample : end_sample]
     splice(start, end) -> remove that region:  concatenate(x[:start], x[end:])
+    reverse(a, b)      -> y[n] = x[a + b - 1 - n] for a <= n < b, x[n] elsewhere
+                          (time reversal: X(e^{jw}) -> X(e^{-jw}) = conj X for real x, so
+                          the magnitude spectrum is unchanged and only the phase flips --
+                          same notes, decays become swells)
 A few milliseconds of linear fade at each new boundary removes the step.
 """
 
@@ -61,3 +65,24 @@ def splice(x: np.ndarray, fs: int, start: float = 0.0, end: float = 0.0) -> np.n
     head = fade_edges(x[:a], fs, fade_in=False, fade_out=True)   # fade down into the cut
     tail = fade_edges(x[b:], fs, fade_in=True, fade_out=False)   # fade up out of the cut
     return np.concatenate([head, tail])
+
+
+def reverse(x: np.ndarray, fs: int, start: float = 0.0, end: float = 0.0) -> np.ndarray:
+    """Play the span [start, end) seconds backwards (end <= 0 means 'to the end').
+
+    With the defaults the whole buffer is reversed and no fade is needed: the first and
+    last samples simply swap places.  A partial span creates two new joins, where the
+    reversed piece meets the untouched audio, and BOTH sides of each join get the usual
+    anti-click ramp (as in splice), so every join passes through zero.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    a = to_samples(start, fs, x.size)
+    b = x.size if end <= 0 else to_samples(end, fs, x.size)
+    if b - a < 2:
+        return x
+    if a == 0 and b == x.size:
+        return x[::-1].copy()
+    head = fade_edges(x[:a], fs, fade_in=False, fade_out=True)
+    middle = fade_edges(x[a:b][::-1].copy(), fs, fade_in=a > 0, fade_out=b < x.size)
+    tail = fade_edges(x[b:], fs, fade_in=True, fade_out=False)
+    return np.concatenate([head, middle, tail])

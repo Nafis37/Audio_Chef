@@ -10,11 +10,17 @@
  * pass, 300 ms after every slider move.  Reusing the instance is what makes Auto-Bake
  * feel live, and it also means playback does not jump back to the start on a re-bake.
  *
- * Two plugins ride along, both of which ship inside wavesurfer.js itself:
+ * Three plugins ride along, all of which ship inside wavesurfer.js itself:
  *
  *   timeline -- the seconds axis under both waveforms.  Without it there is no way to
  *               tell WHEN anything happens, which made the Mini Audio Editor's start/end
- *               numbers pure guesswork.
+ *               numbers pure guesswork.  Its label step is chosen from the clip length
+ *               and the panel width (time.ts rulerSpacing) so labels always land on
+ *               round times, never crowd, and read as m:ss like every other clock here.
+ *               The plugin reads its intervals at creation, so a new length or width
+ *               re-registers it.
+ *   hover    -- a line and a m:ss.cc label that follow the pointer, so you can see
+ *               exactly where a click will jump to BEFORE clicking.
  *   regions  -- the draggable span on the Input, bound to the linked card's two time
  *               parameters.  See src/regions.ts for which operations have one.
  *
@@ -34,7 +40,9 @@ import { Pause, Play } from 'lucide-react'
 import { memo, useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin, { type Region } from 'wavesurfer.js/dist/plugins/regions.esm.js'
+import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js'
 import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js'
+import { formatTime, rulerSpacing, type RulerSpacing } from '../time'
 import type { SpectrogramData, SpectrogramMarker } from '../types'
 import { Spectrogram } from './Spectrogram'
 
@@ -80,6 +88,19 @@ const THROTTLE_MS = 80
 
 /** Region edges within this many seconds of the props count as "already there". */
 const EPSILON = 0.001
+
+/** A timeline with round label steps for this clip length and panel width. */
+function makeTimeline(spacing: RulerSpacing) {
+  return TimelinePlugin.create({
+    height: 22,
+    timeInterval: spacing.tick,
+    primaryLabelInterval: spacing.label,
+    secondaryLabelInterval: spacing.label,   // no dim in-between labels: one clear row
+    secondaryLabelOpacity: 0.35,             // the small ticks
+    formatTimeCallback: (seconds) => formatTime(seconds, spacing.decimals),
+    style: { color: '#1f2421', fontSize: '11px', fontFamily: 'ui-monospace, monospace' },
+  })
+}
 
 function WaveformViewerImpl({
   title,
@@ -127,6 +148,9 @@ function WaveformViewerImpl({
 
   const [playing, setPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
+  // The running clock is written straight into the DOM: a state update per
+  // 'timeupdate' would re-render this panel ~60 times a second during playback.
+  const clock = useRef<HTMLSpanElement>(null)
   const [ready, setReady] = useState(false)
   // Set when the BROWSER cannot decode the file.  The backend decodes with libsndfile,
   // which reads more formats than any browser does (AIFF, W64, CAF, AU), so a file can
@@ -139,6 +163,8 @@ function WaveformViewerImpl({
 
     const regionsPlugin = RegionsPlugin.create()
     regions.current = regionsPlugin
+    let timeline: ReturnType<typeof makeTimeline> | null = null
+    let spacingKey = ''
 
     const instance = WaveSurfer.create({
       container: container.current,
@@ -153,13 +179,35 @@ function WaveformViewerImpl({
       normalize: false,         // true amplitude: see the header comment
       plugins: [
         regionsPlugin,
-        TimelinePlugin.create({
-          height: 18,
-          style: { color: '#6b7280', fontSize: '10px' },   // --chef-muted
+        HoverPlugin.create({
+          lineColor: accent,
+          lineWidth: 1,
+          labelBackground: '#1f2421',
+          labelColor: '#ffffff',
+          labelSize: 11,
+          formatTimeCallback: (seconds) => formatTime(seconds, 2),
         }),
       ],
     })
     wavesurfer.current = instance
+
+    /** (Re)build the ruler when the clip length or panel width asks for another step. */
+    const syncTimeline = () => {
+      const length = instance.getDuration()
+      if (!(length > 0)) return
+      const spacing = rulerSpacing(length, instance.getWidth())
+      const key = `${spacing.label}/${spacing.tick}`
+      if (key === spacingKey && timeline) return
+      spacingKey = key
+      timeline?.destroy()
+      timeline = instance.registerPlugin(makeTimeline(spacing))
+    }
+    instance.on('redraw', syncTimeline)
+
+    const writeClock = (seconds: number) => {
+      if (clock.current) clock.current.textContent = formatTime(seconds, 2)
+    }
+    instance.on('timeupdate', writeClock)
 
     instance.on('play', () => {
       setPlaying(true)
@@ -170,6 +218,8 @@ function WaveformViewerImpl({
     instance.on('ready', () => {
       setDuration(instance.getDuration())
       setReady(true)
+      syncTimeline()
+      writeClock(instance.getCurrentTime())
     })
 
     /** Publishes a dragged edge upward, throttled so a drag is not one render per pixel. */
@@ -296,7 +346,11 @@ function WaveformViewerImpl({
         </h2>
         {duration > 0 && (
           <span className="font-mono text-xs text-[var(--chef-muted)]">
-            {duration.toFixed(2)}s
+            <span ref={clock} className="text-[var(--chef-text)]">
+              {formatTime(0, 2)}
+            </span>
+            {' / '}
+            {formatTime(duration, 2)}
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">{children}</div>

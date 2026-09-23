@@ -58,12 +58,16 @@ from typing import Any
 import numpy as np
 
 from . import mixer
+from .caricature import CARICATURES, apply_tempo, caricature, tempo_of
 from .compressor import compressor
+from .declip import declip
 from .echo_reverb import echo, reverb
-from .editor import splice, trim
+from .editor import reverse, splice, trim
 from .eq import equalizer
 from .filters import cutoff_filter
+from .level import level
 from .noise import noise_reduce
+from .silence import remove_silence
 from .speed_pitch import speed_pitch
 from .voice_changer import voice_changer
 from .voice_match import voice_match
@@ -137,6 +141,30 @@ def _editor_op(x, fs, mode="trim", start=0.0, end=0.0):
     if mode == "splice":
         return splice(x, fs, start=start, end=end)
     return trim(x, fs, start=start, end=end)
+
+
+def _reverse_op(x, fs, mode="whole", start=0.0, end=0.0):
+    """Whole file, or only the selected span."""
+    if mode == "selection":
+        return reverse(x, fs, start=start, end=end)
+    return reverse(x, fs)
+
+
+def _phase_vocoder_op(x, fs, mode="chipmunk", semitones=7.0, robot_freq=100.0, mix=1.0):
+    """The four classic characters, or a celebrity caricature (caricature.py).
+
+    A caricature's tempo changes the length, so the dry/wet blend happens first -- on two
+    buffers of the same length -- and the tempo is applied to the blend.
+    """
+    if mode not in CARICATURES:
+        return voice_changer(x, fs, mode=mode, semitones=semitones,
+                             robot_freq=robot_freq, mix=mix)
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return x
+    m = float(np.clip(mix, 0.0, 1.0))
+    blend = (1.0 - m) * x + m * caricature(x, fs, mode)
+    return apply_tempo(blend, tempo_of(mode))
 
 
 def _assemble_op(x, fs, ctx, source="", mode="mix", position=0.0,
@@ -235,7 +263,77 @@ OPERATIONS: list[dict[str, Any]] = [
                  advanced=True),
         ],
     },
+    {
+        "id": "declip",
+        "label": "De-clip",
+        "icon": "Activity",
+        "category": "Clean up",
+        "summary": "Redraws peaks that were sliced flat by recording too loud.",
+        "how": "Each flat top of 3+ samples is replaced by a cubic Hermite curve that "
+               "continues the slopes into and out of it.",
+        "listen_for": "Harsh crackle on the loudest words softens. The output peak rises "
+                      "above the old ceiling (and the whole file is turned down to fit).",
+        "handler": declip,
+        "params": [
+            _pct("thresh", "Clip level", 99, lo=80, hi=100,
+                 help="Samples at or above this fraction of the file's peak count as clipped."),
+        ],
+    },
+    {
+        "id": "silence_remover",
+        "label": "Silence Remover",
+        "icon": "VolumeX",
+        "category": "Clean up",
+        "summary": "Cuts the pauses out, leaving a short breath in each.",
+        "how": "10 ms RMS levels from one cumulative sum; quiet runs longer than the minimum "
+               "are shortened, and every join gets a 5 ms fade.",
+        "listen_for": "The output is shorter and the talking never stops. Short gaps between "
+                      "words are left alone.",
+        "handler": remove_silence,
+        "quick": {
+            "Gentle": {"threshold_db": -50, "min_silence": 0.6, "keep": 0.25},
+            "Tight": {"threshold_db": -40, "min_silence": 0.3, "keep": 0.1},
+            "Jump cut": {"threshold_db": -35, "min_silence": 0.15, "keep": 0.0},
+        },
+        "params": [
+            _num("threshold_db", "Quieter than", -40.0, -80.0, -10.0, 1.0, "dB",
+                 help="Anything quieter than this counts as silence."),
+            _num("min_silence", "Longer than", 0.3, 0.05, 3.0, 0.05, "s",
+                 help="Only pauses at least this long are cut, so gaps between words survive."),
+            _num("keep", "Leave", 0.1, 0.0, 1.0, 0.01, "s",
+                 help="How much of each pause to keep, so the cut sounds like a breath."),
+        ],
+    },
     # ---- Tone & level ----------------------------------------------------------------
+    {
+        "id": "level",
+        "label": "Level & DC",
+        "icon": "BarChart3",
+        "category": "Tone & level",
+        "summary": "Re-centres the waveform on zero, then sets the loudness.",
+        "how": "Mean subtraction + a one-pole DC blocker, then one scalar gain to a peak "
+               "or RMS target.",
+        "listen_for": "The output waveform sits on the centre line and fills the panel "
+                      "to the chosen level.",
+        "handler": level,
+        "quick": {
+            "Peak -1 dB": {"target": "peak", "peak_db": -1},
+            "Speech -18 dB": {"target": "rms", "rms_db": -18},
+            "DC only": {"dc": True, "target": "none"},
+        },
+        "params": [
+            _bool("dc", "Remove DC offset", True,
+                  help="Shift the waveform back onto the zero line."),
+            _enum("target", "Set level by", "peak", ["peak", "rms", "none"],
+                  option_labels={"peak": "Loudest peak", "rms": "Average (RMS)",
+                                 "none": "Don't change"},
+                  help="Peak: the loudest sample hits the target. RMS: the average loudness does."),
+            _num("peak_db", "Peak target", -1.0, -24.0, 0.0, 0.5, "dB",
+                 show_when={"target": ["peak"]}),
+            _num("rms_db", "RMS target", -18.0, -40.0, -6.0, 0.5, "dB",
+                 show_when={"target": ["rms"]}),
+        ],
+    },
     {
         "id": "equalizer",
         "label": "Equalizer",
@@ -428,20 +526,31 @@ OPERATIONS: list[dict[str, Any]] = [
     # ---- Voice -----------------------------------------------------------------------
     {
         "id": "voice_changer",
-        "label": "Voice Changer",
+        "label": "Phase Vocoder",
         "icon": "Mic",
         "category": "Voice",
-        "summary": "Turn a voice into a chipmunk, a monster, a robot or a whisper.",
+        "summary": "Turn a voice into a chipmunk, a monster, a robot, a whisper -- or a "
+                   "rough caricature of a famous voice.",
         "how": "The STFT rebuilt with a new phase: bins shifted in frequency, a fixed pulse "
                "per frame, or random phase.",
         "listen_for": "Chipmunk/monster: the stripes on the spectrogram move up/down. Robot: "
                       "they snap to evenly spaced lines. Whisper: they dissolve into haze.",
-        "handler": voice_changer,
+        "handler": _phase_vocoder_op,
+        "quick": {
+            "Chipmunk": {"mode": "chipmunk"},
+            "Robot": {"mode": "robot"},
+            "Ronaldo": {"mode": "ronaldo"},
+            "Messi": {"mode": "messi"},
+            "Trump": {"mode": "trump"},
+        },
         "params": [
-            _enum("mode", "Voice", "chipmunk", ["chipmunk", "monster", "robot", "whisper"],
+            _enum("mode", "Voice", "chipmunk",
+                  ["chipmunk", "monster", "robot", "whisper", *CARICATURES],
                   option_labels={"chipmunk": "Chipmunk", "monster": "Monster",
-                                 "robot": "Robot", "whisper": "Whisper"},
-                  help="Which character to turn the voice into."),
+                                 "robot": "Robot", "whisper": "Whisper",
+                                 **{k: c.label for k, c in CARICATURES.items()}},
+                  help="Which character to turn the voice into. The celebrity voices are "
+                       "loose impressions (pitch, throat size, pace, rasp) -- not clones."),
             _num("semitones", "How far", 7.0, 1.0, 12.0, 0.5, "st",
                  help="How many semitones up (chipmunk) or down (monster). 12 = one octave.",
                  show_when={"mode": ["chipmunk", "monster"]}),
@@ -507,10 +616,31 @@ OPERATIONS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "reverse",
+        "label": "Reverse",
+        "icon": "Undo2",
+        "category": "Edit",
+        "summary": "Plays the audio backwards -- all of it, or just a part.",
+        "how": "Time reversal y[n] = x[N-1-n]: the same magnitude spectrum, the phase flipped.",
+        "listen_for": "Decays turn into swells; the output waveform is the input mirrored.",
+        "handler": _reverse_op,
+        "params": [
+            _enum("mode", "Reverse", "whole", ["whole", "selection"],
+                  option_labels={"whole": "The whole clip", "selection": "Only a part"},
+                  help="Only a part: drag the violet region on the Input waveform."),
+            _num("start", "From", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 show_when={"mode": ["selection"]}),
+            _num("end", "To", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 help="0 = the end of the file.", show_when={"mode": ["selection"]}),
+        ],
+    },
+    {
         "id": "assemble",
         "label": "Assemble Clip",
         "icon": "Layers",
         "category": "Edit",
+        # Replaced by the Arrange tab (arrange.py); kept so saved recipes still bake.
+        "hidden": True,
         "summary": "Bring in a piece of another loaded file.",
         "how": "Take a span of another source — after ITS recipe has run — and overlay, "
                "insert or append it here.",

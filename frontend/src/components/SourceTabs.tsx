@@ -13,7 +13,7 @@
  * it, say at a glance which file you are working on.
  */
 
-import { Download, Plus, X } from 'lucide-react'
+import { Download, LayoutPanelTop, Plus, X } from 'lucide-react'
 import { memo } from 'react'
 import { Recorder } from './Recorder'
 import type { Source } from '../types'
@@ -28,6 +28,8 @@ interface Props {
   onClose: (id: string) => void
   onPick: (event: React.ChangeEvent<HTMLInputElement>) => void
   onRecord: (file: File) => void
+  /** Opens a new Arrange (timeline) tab. */
+  onArrange: () => void
 }
 
 function SourceTabsImpl({
@@ -39,6 +41,7 @@ function SourceTabsImpl({
   onClose,
   onPick,
   onRecord,
+  onArrange,
 }: Props) {
   if (sources.length === 0) return null
 
@@ -50,6 +53,7 @@ function SourceTabsImpl({
         {sources.map((source) => {
           const active = source.id === activeId
           const steps = source.recipe.length
+          const arrange = source.kind === 'arrange'
           return (
             <div
               key={source.id}
@@ -65,14 +69,22 @@ function SourceTabsImpl({
               <button
                 type="button"
                 onClick={() => onSelect(source.id)}
-                title={`${source.filename} — ${source.duration.toFixed(2)}s · ${source.sampleRate} Hz`}
+                title={
+                  arrange
+                    ? `${source.filename} — ${source.clips.length} blocks`
+                    : `${source.filename} — ${source.duration.toFixed(2)}s · ${source.sampleRate} Hz`
+                }
                 className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
               >
-                <span
-                  className="size-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: source.color }}
-                  aria-hidden
-                />
+                {arrange ? (
+                  <LayoutPanelTop className="size-3 shrink-0" style={{ color: source.color }} aria-hidden />
+                ) : (
+                  <span
+                    className="size-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: source.color }}
+                    aria-hidden
+                  />
+                )}
                 <span className={`truncate ${active ? 'font-medium' : ''}`}>{source.filename}</span>
                 {steps > 0 && (
                   <span className="shrink-0 font-mono text-[10px] text-[var(--chef-muted)]">
@@ -109,6 +121,17 @@ function SourceTabsImpl({
           <Plus className="size-4" />
           <input type="file" accept={accept} className="hidden" onChange={onPick} />
         </label>
+
+        {/* A new timeline tab: arrange pieces of the open files on lanes. */}
+        <button
+          type="button"
+          onClick={onArrange}
+          title="New Arrange tab — place pieces of your files on a multitrack timeline"
+          className="mb-1 flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 text-xs text-[var(--chef-muted)] transition hover:bg-[var(--chef-hover)] hover:text-[var(--chef-text)]"
+        >
+          <LayoutPanelTop className="size-4" />
+          Arrange
+        </button>
 
         {/* Carries the strip's bottom line across the rest of the width. */}
         <div className="flex-1 self-stretch border-b border-[var(--chef-border)]" />

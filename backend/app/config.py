@@ -29,6 +29,8 @@ DEFAULT_SAMPLE_RATE = 44100
 # per-source rows in the X-Bake-Stats response header well under the server's header size
 # limit -- they ride back on every bake.
 MAX_SOURCES = 16
+# Blocks on one Arrange timeline.  Each is a slice + a sum, so this is a sanity bound.
+MAX_CLIPS = 256
 
 # The project runs at the highest rate among its sources, but not higher than this: past
 # here the extra samples cost real time on every bake and buy nothing audible.

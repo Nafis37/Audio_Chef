@@ -100,13 +100,22 @@ export interface UploadInfo {
 export interface Source {
   /** Client-minted handle ("s1").  What an `assemble` card's `source` param stores. */
   id: string
+  /**
+   * 'file': a loaded upload.  'arrange': a timeline whose audio is the sum of its
+   * `clips`, each a piece of another tab's processed output (backend dsp/arrange.py).
+   */
+  kind: 'file' | 'arrange'
   /** The tab's colour (colors.ts), fixed for the life of the source. */
   color: string
-  /** Distinct from `id`: the same upload may be loaded twice with two different chains. */
-  fileId: string
+  /** Distinct from `id`: the same upload may be loaded twice with two different chains.
+   *  null for an Arrange tab. */
+  fileId: string | null
+  /** The tab's title: the file's name, or "Arrangement 2". */
   filename: string
-  /** Blob URL of the RAW file, drawn locally by the Input waveform. */
-  url: string
+  /** Blob URL of the RAW file, drawn locally by the Input waveform; null for Arrange. */
+  url: string | null
+  /** An Arrange tab's blocks; empty for a file tab. */
+  clips: ArrangeClip[]
   sampleRate: number
   channels: number
   /** Raw length in seconds -- what this source's region handles are measured against. */
@@ -116,9 +125,34 @@ export interface Source {
   activeUid: string | null
 }
 
+/**
+ * One block on an Arrange timeline.  Seconds throughout; `clipEnd` 0 = the source's end.
+ * `lane` is UI-only (the backend just sums the blocks).
+ */
+export interface ArrangeClip {
+  uid: string
+  /** The file tab it plays (its PROCESSED output). */
+  source: string
+  /** Where on the timeline it starts. */
+  start: number
+  clipStart: number
+  clipEnd: number
+  gainDb: number
+  lane: number
+}
+
+/** An Arrange block as the backend wants it. */
+export interface WireClip {
+  source: string
+  start: number
+  clip_start: number
+  clip_end: number
+  gain_db: number
+}
+
 /** The body of POST /process. */
 export interface ProcessGraphRequest {
-  sources: { id: string; file_id: string; recipe: WireStep[] }[]
+  sources: { id: string; file_id?: string; clips?: WireClip[]; recipe: WireStep[] }[]
   master: WireStep[]
   output_source: string
   apply_master: boolean
@@ -235,16 +269,25 @@ export interface SpectrogramData {
   pixels: Uint8Array
 }
 
-/** GET /filter/response -- the Filter card's curve, |H(e^{jw})| in dB on a log axis. */
-export interface FilterResponse {
-  freqs: number[]
-  db: number[]
-  cutoff: number
-  fs: number
-}
-
 /** A labelled horizontal line on a spectrogram, e.g. a filter's cutoff. */
 export interface SpectrogramMarker {
   hz: number
   label: string
+}
+
+/** One row of Signal Doctor's checklist (backend/app/dsp/doctor.py). */
+export interface DoctorFinding {
+  id: string
+  status: 'ok' | 'warn' | 'bad'
+  title: string
+  /** The measurement behind the verdict, e.g. "floor -40 dBFS · 77 % above 2 kHz". */
+  value: string
+  detail: string
+  fix: WireStep[]
+}
+
+/** GET /diagnose/...: the checklist plus the combined prescription, in recipe order. */
+export interface DoctorReport {
+  findings: DoctorFinding[]
+  fix: WireStep[]
 }

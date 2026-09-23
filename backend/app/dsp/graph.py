@@ -4,7 +4,8 @@ The source graph -- resolving one recipe per source, plus a master chain
 A project is no longer one buffer and one recipe.  It is a set of named sources, each
 with its own chain, and an `assemble` card inside a chain can pull in the PROCESSED
 output of another source (so can `voice_match`, which reads two calibration takes).  That makes the set a DAG rather than a list, and this module
-is what walks it.
+is what walks it.  An Arrange tab is a source whose raw audio is itself built from other
+sources' processed output (arrange.py), which is just more edges in the same DAG.
 
     evaluate(sources, master, output_source, ...) -> (samples, fs, report)
 
@@ -28,7 +29,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from . import dsp_engine, editor, voice_calibration
+from . import arrange, dsp_engine, editor, voice_calibration
 
 # A chain that assembles a chain that assembles ... this deep is not a real edit; it is
 # almost certainly a mistake, and the recursion has to stop somewhere regardless.
@@ -142,6 +143,14 @@ class Evaluator:
             return cached
 
         spec = self._spec(source_id)
+        if getattr(spec, "clips", None) is not None:
+            # An Arrange tab: its "file" is the sum of its clips.  Built here, which
+            # processed() only calls AFTER pushing this source on the stack -- so a block
+            # that points back at its own arrangement is caught as a cycle.
+            buffer = arrange.render_arrangement(self.processed, spec.clips, self.fs)
+            self._raw[source_id] = buffer
+            return buffer
+
         samples, file_fs = self._loader(spec.file_id)
         if int(file_fs) != int(self.fs):
             self.resampled.append(source_id)

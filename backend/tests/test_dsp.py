@@ -22,7 +22,10 @@ from app.dsp.dsp_engine import (
     HEADROOM, OPERATIONS, _coerce, operations_schema, run_recipe, run_recipe_measured,
 )
 from app.dsp.echo_reverb import echo, reverb
-from app.dsp.editor import splice, trim
+from app.dsp.declip import clipped_runs, declip
+from app.dsp.editor import reverse, splice, trim
+from app.dsp.level import level, remove_dc
+from app.dsp.silence import remove_silence, silent_runs
 from app.dsp.eq import equalizer, high_shelf_coefficients, low_shelf_coefficients
 from app.dsp.filters import butterworth_qs, cutoff_filter, filter_response, sections
 from app.dsp.noise import noise_reduce
@@ -393,13 +396,15 @@ def test_percent_params_are_scaled_for_the_handler():
 def test_every_default_is_audible():
     # Dropping a card in with no tweaks must change the sound.  (The editor, assemble and
     # voice_match need a selection or other files first, so they are exempt -- voice_match
-    # is covered with its references in test_voice_match.py.)
+    # is covered with its references in test_voice_match.py.  declip and silence_remover
+    # repair something this signal does not have -- flat tops, long pauses -- and are
+    # tested on signals that do, below.)
     # Speech-like on purpose: a loud half and a quiet half (a compressor with auto-makeup
     # is rightly a no-op on a constant level) over a little hiss (for the noise remover).
     x = np.concatenate([sine(300.0, 0.5, amp=0.4), sine(300.0, 0.5, amp=0.04)])
     x = x + 0.02 * np.random.default_rng(5).standard_normal(x.size)
     for op in OPERATIONS:
-        if op["id"] in {"editor", "assemble", "voice_match"} or op.get("hidden"):
+        if op["id"] in {"editor", "assemble", "voice_match", "declip", "silence_remover"} or op.get("hidden"):
             continue
         y = run_recipe(x, FS, [{"op": op["id"]}])
         n = min(x.size, y.size)
@@ -482,3 +487,70 @@ def test_no_banned_dsp_library_is_used():
                 base = node.value
                 name = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
                 assert name != "signal", path
+
+
+# ---- Reverse, Silence Remover, Level & DC, De-clip ----------------------------------
+
+def test_reverse_twice_is_the_identity():
+    x = np.random.default_rng(1).standard_normal(FS)
+    np.testing.assert_array_equal(reverse(reverse(x, FS), FS), x)
+
+
+def test_reverse_keeps_the_magnitude_spectrum():
+    # x[-n] <-> conj X for real x: only the phase changes.
+    x = sine(440.0, 0.5) + sine(1250.0, 0.5, amp=0.2)
+    np.testing.assert_allclose(np.abs(np.fft.rfft(reverse(x, FS))),
+                               np.abs(np.fft.rfft(x)), atol=1e-8)
+
+
+def test_reverse_selection_leaves_the_rest_alone():
+    x = np.linspace(-0.5, 0.5, FS)
+    y = reverse(x, FS, start=0.25, end=0.5)
+    a, b = int(0.25 * FS), int(0.5 * FS)
+    ramp = int(0.005 * FS)
+    np.testing.assert_array_equal(y[: a - ramp], x[: a - ramp])
+    np.testing.assert_array_equal(y[b + ramp:], x[b + ramp:])
+    np.testing.assert_array_equal(y[a + ramp: b - ramp], x[a:b][::-1][ramp:-ramp])
+
+
+def test_silence_remover_shortens_each_pause_to_keep():
+    tone = sine(300.0, 0.5)
+    gap = np.zeros(FS)                           # 1 s of digital silence
+    x = np.concatenate([tone, gap, tone, gap, tone])
+    assert len(silent_runs(x, FS)) == 2
+    y = remove_silence(x, FS, threshold_db=-40.0, min_silence=0.3, keep=0.1)
+    # Each 1 s gap shrinks to ~0.1 s (the RMS window blurs each edge by ~one hop).
+    assert abs(y.size / FS - (1.5 + 2 * 0.1)) < 0.05
+    # Every join is faded: no sample-to-sample step larger than the tone's own.
+    assert np.max(np.abs(np.diff(y))) <= np.max(np.abs(np.diff(tone))) + 1e-9
+
+
+def test_silence_remover_leaves_short_gaps():
+    tone = sine(300.0, 0.3)
+    x = np.concatenate([tone, np.zeros(int(0.1 * FS)), tone])
+    np.testing.assert_array_equal(remove_silence(x, FS, min_silence=0.3), x)
+
+
+def test_dc_blocker_removes_an_offset():
+    x = sine(200.0, 1.0) + 0.2
+    y = remove_dc(x, FS)
+    assert abs(np.mean(y)) < 1e-3
+    # Away from DC the blocker passes: the 200 Hz tone keeps its level.
+    assert abs(rms(y) - rms(sine(200.0, 1.0))) < 0.01
+
+
+def test_level_hits_its_targets():
+    x = 0.1 * sine(440.0, 0.5, amp=1.0)
+    y = level(x, FS, dc=False, target="peak", peak_db=-6.0)
+    assert np.max(np.abs(y)) == pytest.approx(10 ** (-6 / 20), rel=1e-9)
+    y = level(x, FS, dc=False, target="rms", rms_db=-20.0)
+    assert rms(y) == pytest.approx(0.1, rel=1e-9)
+
+
+def test_declip_restores_flattened_peaks():
+    clean = sine(200.0, 0.5, amp=1.4)            # 1.4 peak, sliced at 1.0
+    clipped = np.clip(clean, -1.0, 1.0)
+    assert clipped_runs(clipped)
+    y = declip(clipped, FS)
+    assert np.max(np.abs(y)) > 1.2                # the lost tops are redrawn
+    assert rms(y - clean) < 0.5 * rms(clipped - clean)

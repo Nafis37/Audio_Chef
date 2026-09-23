@@ -33,27 +33,32 @@
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd'
 import { ChefHat, Pause, Play, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchOperations, fetchSpectrogram, processGraph, toWire, uploadFile } from './api'
+import { fetchOperations, fetchSpectrogram, processGraph, toWire, toWireClips, uploadFile } from './api'
 import { ColumnSplitter } from './components/ColumnSplitter'
 import { ListenStats } from './components/ListenStats'
 import { OperationsPalette } from './components/OperationsPalette'
 import { Recipe } from './components/Recipe'
 import { Recorder } from './components/Recorder'
+import { SignalDoctor } from './components/SignalDoctor'
 import { SourceTabs } from './components/SourceTabs'
+import { Timeline } from './components/Timeline'
 import { Toolbar } from './components/Toolbar'
 import { WaveformViewer, type RegionSpec, type WaveformHandle } from './components/WaveformViewer'
 import { sourceColor } from './colors'
 import { filterMarkers } from './filterMarkers'
+import { forgetPeaks } from './peaks'
 import type { Preset } from './presets'
 import { regionFor } from './regions'
 import { SourcesProvider, type SourceOption } from './sources'
 import {
+  type ArrangeClip,
   type BakeResult,
   type OperationDef,
   type ParamValue,
   type RecipeStep,
   type Source,
   type SpectrogramData,
+  type WireStep,
 } from './types'
 
 /** A bake faster than this never shows the "baking…" overlay -- it would only flicker. */
@@ -215,6 +220,8 @@ export default function App() {
         ...current,
         {
           id,
+          kind: 'file',
+          clips: [],
           color: sourceColor(serial),
           fileId: info.file_id,
           filename: info.filename,
@@ -241,6 +248,40 @@ export default function App() {
     }
   }, [])
 
+  // --- Arrange tabs ---------------------------------------------------------------------
+  /** A new, empty timeline tab.  Its audio is the sum of its blocks (dsp/arrange.py). */
+  const arrangeCount = useRef(0)
+  const createArrangement = useCallback(() => {
+    const serial = nextSourceId.current++
+    const id = `s${serial}`
+    arrangeCount.current += 1
+    setSources((current) => [
+      ...current,
+      {
+        id,
+        kind: 'arrange',
+        clips: [],
+        color: sourceColor(serial),
+        fileId: null,
+        filename: `Arrangement ${arrangeCount.current}`,
+        url: null,
+        sampleRate: 0,
+        channels: 1,
+        duration: 0,
+        recipe: [],
+        activeUid: null,
+      },
+    ])
+    setEditing(id)
+    setStatus('Drag files onto the timeline lanes')
+  }, [])
+
+  const setClips = useCallback((id: string, clips: ArrangeClip[]) => {
+    setSources((current) =>
+      current.map((source) => (source.id === id ? { ...source, clips } : source)),
+    )
+  }, [])
+
   const removeSource = useCallback(
     (id: string) => {
       // Revoke out here, not inside an updater: StrictMode double-invokes updaters, and
@@ -249,13 +290,22 @@ export default function App() {
       if (url) {
         URL.revokeObjectURL(url)
         inputUrls.current.delete(id)
+        forgetPeaks(url)
       }
 
       // Every setState below is a plain call on a value computed here.  Nesting them
       // inside the setSources updater would fire them twice under StrictMode for what
       // is one edit -- the same trap the blob URLs above are avoiding.
       const index = sources.findIndex((source) => source.id === id)
-      const remaining = sources.filter((source) => source.id !== id)
+      // Closing a file also takes its blocks off every timeline: a block cannot play a
+      // tab that no longer exists.
+      const remaining = sources
+        .filter((source) => source.id !== id)
+        .map((source) =>
+          source.clips.some((clip) => clip.source === id)
+            ? { ...source, clips: source.clips.filter((clip) => clip.source !== id) }
+            : source,
+        )
       // Closing the open tab opens its right-hand neighbour, else the left one -- the
       // tab that slides under the pointer, as in a browser.
       const fallback = remaining[Math.min(index, remaining.length - 1)]?.id ?? null
@@ -306,11 +356,11 @@ export default function App() {
   /** The request that renders one tab: its file through its own recipe, nothing else. */
   const renderRequest = useCallback(
     (id: string) => ({
-      sources: sources.map((source) => ({
-        id: source.id,
-        file_id: source.fileId,
-        recipe: toWire(source.recipe),
-      })),
+      sources: sources.map((source) =>
+        source.kind === 'arrange'
+          ? { id: source.id, clips: toWireClips(source.clips), recipe: toWire(source.recipe) }
+          : { id: source.id, file_id: source.fileId ?? '', recipe: toWire(source.recipe) },
+      ),
       // No shared final chain: every tab stands on its own.
       master: [],
       output_source: id,
@@ -322,8 +372,10 @@ export default function App() {
   const bake = useCallback(async () => {
     if (!editing) return
 
-    // An empty recipe is a no-op pipeline: show the Input panel, do not round-trip.
-    if (recipe.length === 0) {
+    // An empty recipe is a no-op pipeline: show the Input panel, do not round-trip.  An
+    // Arrange tab is the exception -- its blocks ARE the content -- unless it is empty.
+    const content = editingSource?.kind === 'arrange' ? editingSource.clips.length > 0 : recipe.length > 0
+    if (!content) {
       inFlight.current?.abort()
       clearOutput()
       setStatus('Ready — add an operation to the recipe')
@@ -357,7 +409,7 @@ export default function App() {
         setShowBusy(false)
       }
     }
-  }, [editing, recipe, renderRequest, clearOutput])
+  }, [editing, editingSource, recipe, renderRequest, clearOutput])
 
   // --- The output spectrogram follows each bake ------------------------------------
   const bakeId = output?.bakeId ?? null
@@ -503,6 +555,22 @@ export default function App() {
     [operations, editing, editChain, setActiveUid],
   )
 
+  // Signal Doctor's prescription is APPENDED to the open chain (never replaces it), as
+  // ordinary cards built the same way a preset builds them.
+  const appendSteps = useCallback(
+    (wire: WireStep[]) => {
+      const byId = new Map(operations.map((op) => [op.id, op]))
+      const steps = wire.flatMap(({ op: id, params }) => {
+        const op = byId.get(id)
+        if (!op) return []
+        const step = newStep(op)
+        return [{ ...step, params: { ...step.params, ...params } }]
+      })
+      editChain(editing, (current) => [...current, ...steps])
+    },
+    [operations, editing, editChain],
+  )
+
   const toggleAutoBake = useCallback(() => setAutoBake((value) => !value), [])
 
   const updateParam = useCallback(
@@ -562,7 +630,8 @@ export default function App() {
   const sourceOptions: SourceOption[] = useMemo(
     () =>
       sources
-        .filter((source) => source.id !== editing)
+        // An Arrange tab has no source of its own to be a calibration take or a clip of.
+        .filter((source) => source.id !== editing && source.kind === 'file')
         .map((source) => ({ id: source.id, label: source.filename })),
     [sources, editing],
   )
@@ -715,12 +784,23 @@ export default function App() {
   }, [editing, saveSource])
 
   // --- Toolbar summary ---------------------------------------------------------------
-  const projectInfo = editingSource
+  const projectInfo = editingSource?.kind === 'arrange'
+    ? `${editingSource.clips.length} block${editingSource.clips.length === 1 ? '' : 's'}` +
+      (output ? ` · ${output.duration.toFixed(2)}s mix` : '')
+    : editingSource
     ? `${editingSource.duration.toFixed(2)}s · ${editingSource.sampleRate} Hz · ${editingSource.channels}ch` +
       (sources.length > 1 ? ` · ${sources.length} tabs` : '')
     : null
 
-  const hasAnySteps = recipe.length > 0
+  const isArrange = editingSource?.kind === 'arrange'
+  const hasAnySteps = recipe.length > 0 || (isArrange && editingSource.clips.length > 0)
+  const fileTabs = useMemo(() => sources.filter((source) => source.kind === 'file'), [sources])
+  const onClipsChange = useCallback(
+    (clips: ArrangeClip[]) => {
+      if (editing) setClips(editing, clips)
+    },
+    [editing, setClips],
+  )
 
   return (
     <div className="flex h-screen flex-col bg-[var(--chef-bg)] text-[var(--chef-text)]">
@@ -747,6 +827,7 @@ export default function App() {
         onClose={removeSource}
         onPick={onPickFile}
         onRecord={handleFile}
+        onArrange={createArrangement}
       />
 
       <DragDropContext onDragEnd={onDragEnd}>
@@ -811,59 +892,67 @@ export default function App() {
 
             {sources.length > 0 ? (
               <div className="space-y-4 p-4">
-                {/* A/B: one transport for both panels.  Picking a side mid-playback carries
-                    on from the same point in the other file. */}
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--chef-border)] bg-[var(--chef-panel)] px-3 py-2">
-                  <button
-                    type="button"
-                    onClick={playPauseCurrent}
-                    className="rounded-full border border-[var(--chef-border)] p-1.5 transition hover:border-[var(--chef-accent-strong)]"
-                    title="Play / pause what you are listening to"
-                  >
-                    <PlayPauseIcon viewRef={hearing === 'input' ? inputView : outputView} />
-                  </button>
-                  <span className="text-xs text-[var(--chef-muted)]">Listening to</span>
-                  <div className="flex rounded-md border border-[var(--chef-border)] bg-[var(--chef-inset)] p-0.5">
-                    {(['input', 'output'] as const).map((side) => (
+                {isArrange && editingSource ? (
+                  /* An Arrange tab has no input of its own: the timeline IS its content,
+                     and the Output below plays the mix through this tab's recipe. */
+                  <Timeline clips={editingSource.clips} files={fileTabs} onChange={onClipsChange} />
+                ) : (
+                  <>
+                    {/* A/B: one transport for both panels.  Picking a side mid-playback carries
+                        on from the same point in the other file. */}
+                    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--chef-border)] bg-[var(--chef-panel)] px-3 py-2">
                       <button
-                        key={side}
                         type="button"
-                        disabled={side === 'output' && !output}
-                        onClick={() => listenTo(side)}
-                        className={`rounded px-3 py-1 text-xs transition disabled:opacity-30 ${
-                          hearing === side
-                            ? 'bg-[var(--chef-accent-strong)] font-medium text-white'
-                            : 'text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
-                        }`}
+                        onClick={playPauseCurrent}
+                        className="rounded-full border border-[var(--chef-border)] p-1.5 transition hover:border-[var(--chef-accent-strong)]"
+                        title="Play / pause what you are listening to"
                       >
-                        {side === 'input' ? 'A · Original' : 'B · Processed'}
+                        <PlayPauseIcon viewRef={hearing === 'input' ? inputView : outputView} />
                       </button>
-                    ))}
-                  </div>
-                  <span className="ml-auto text-[11px] text-[var(--chef-muted)]">
-                    press <kbd className="rounded border border-[var(--chef-border)] px-1 font-mono">B</kbd> to flip
-                  </span>
-                </div>
+                      <span className="text-xs text-[var(--chef-muted)]">Listening to</span>
+                      <div className="flex rounded-md border border-[var(--chef-border)] bg-[var(--chef-inset)] p-0.5">
+                        {(['input', 'output'] as const).map((side) => (
+                          <button
+                            key={side}
+                            type="button"
+                            disabled={side === 'output' && !output}
+                            onClick={() => listenTo(side)}
+                            className={`rounded px-3 py-1 text-xs transition disabled:opacity-30 ${
+                              hearing === side
+                                ? 'bg-[var(--chef-accent-strong)] font-medium text-white'
+                                : 'text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
+                            }`}
+                          >
+                            {side === 'input' ? 'A · Original' : 'B · Processed'}
+                          </button>
+                        ))}
+                      </div>
+                      <span className="ml-auto text-[11px] text-[var(--chef-muted)]">
+                        press <kbd className="rounded border border-[var(--chef-border)] px-1 font-mono">B</kbd> to flip
+                      </span>
+                    </div>
 
-                <WaveformViewer
-                  title={`Input — ${editingSource?.filename ?? ''}`}
-                  url={editingSource?.url ?? null}
-                  accent="#22c55e"
-                  emptyHint=""
-                  region={region}
-                  onRegionChange={onRegionChange}
-                  ref={inputView}
-                  spectrogram={inputSpectrograms.get(editing ?? '') ?? null}
-                  markers={cutoffMarkers}
-                  highlighted={hearing === 'input'}
-                  onPlay={onInputPlay}
-                >
-                  {binding && (
-                    <span className="text-[11px] text-[var(--chef-muted)]">
-                      {binding.label} — drag the edges
-                    </span>
-                  )}
-                </WaveformViewer>
+                    <WaveformViewer
+                      title={`Input — ${editingSource?.filename ?? ''}`}
+                      url={editingSource?.url ?? null}
+                      accent="#22c55e"
+                      emptyHint=""
+                      region={region}
+                      onRegionChange={onRegionChange}
+                      ref={inputView}
+                      spectrogram={inputSpectrograms.get(editing ?? '') ?? null}
+                      markers={cutoffMarkers}
+                      highlighted={hearing === 'input'}
+                      onPlay={onInputPlay}
+                    >
+                      {binding && (
+                        <span className="text-[11px] text-[var(--chef-muted)]">
+                          {binding.label} — drag the edges
+                        </span>
+                      )}
+                    </WaveformViewer>
+                  </>
+                )}
                 <WaveformViewer
                   title="Output"
                   url={output?.url ?? null}
@@ -882,10 +971,13 @@ export default function App() {
                 />
                 {/* The numbers behind the two pictures.  Always mounted: before the first
                     bake it explains itself rather than leaving the column half empty. */}
+                <SignalDoctor
+                  fileId={editingSource?.fileId ?? null}
+                  bakeId={output?.bakeId ?? null}
+                  onFix={appendSteps}
+                />
                 <ListenStats
                   stats={output?.stats ?? null}
-                  recipe={recipe}
-                  operations={operations}
                   bakeMs={output?.bakeMs ?? 0}
                 />
               </div>

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import config
-from .routers import process, spectrogram, upload
+from .routers import doctor, process, spectrogram, upload
 
 
 @asynccontextmanager
@@ -39,6 +39,7 @@ app.add_middleware(
 app.include_router(upload.router)
 app.include_router(process.router)
 app.include_router(spectrogram.router)
+app.include_router(doctor.router)
 
 
 @app.get("/health")

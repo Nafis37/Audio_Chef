@@ -8,11 +8,10 @@
  *
  * What a card shows, top to bottom -- all of it generated from the backend schema:
  *
- *   header       name, one-line summary, link / On-Off / remove
+ *   header       name, link / On-Off / remove
  *   quick row    one-click settings ("Subtle", "Hall", "Fast talk"...) from `op.quick`
  *   main knobs   the params a first-time user needs
  *   Advanced     everything marked `advanced`, folded away
- *   footer       "Listen for": what should change when you A/B it
  *
  * A param whose `show_when` does not match the step's current values (the robot's buzz
  * while in chipmunk mode, say) is not rendered at all: a knob that does nothing is worse
@@ -26,10 +25,9 @@
  */
 
 import type { DraggableProvided } from '@hello-pangea/dnd'
-import { ChevronRight, Ear, GripVertical, Info, TriangleAlert, X } from 'lucide-react'
+import { ChevronRight, GripVertical, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { iconFor } from '../icons'
-import { FilterResponse } from './FilterResponse'
 import { regionFor } from '../regions'
 import { useSources } from '../sources'
 import {
@@ -54,8 +52,6 @@ interface Props {
   isDragging: boolean
   /** This card owns the region currently drawn on the Input waveform. */
   active: boolean
-  /** True when an earlier un-bypassed step changes the duration.  See below. */
-  timesShifted: boolean
   onSelect: (uid: string) => void
   onParamChange: (uid: string, name: string, value: ParamValue) => void
   /** Several params in one edit -- a quick-setting chip. */
@@ -145,17 +141,8 @@ function formatValue(param: ParamDef, value: number): string {
   }
 }
 
-/** The label, with its plain-language help as a tooltip and a small hint that there is one. */
 function Label({ param }: { param: ParamDef }) {
-  return (
-    <span
-      title={param.help || undefined}
-      className="flex items-center gap-1 text-[var(--chef-muted)]"
-    >
-      {param.label}
-      {param.help && <Info className="size-3 opacity-50" aria-hidden />}
-    </span>
-  )
+  return <span className="flex items-center gap-1 text-[var(--chef-muted)]">{param.label}</span>
 }
 
 /**
@@ -356,7 +343,6 @@ function RecipeCardImpl({
   drag,
   isDragging,
   active,
-  timesShifted,
   onSelect,
   onParamChange,
   onParamsChange,
@@ -417,15 +403,7 @@ function RecipeCardImpl({
         </span>
         <span className="font-mono text-[10px] text-[var(--chef-muted)]">{index + 1}</span>
         <Icon className="size-4 shrink-0 text-[var(--chef-accent-strong)]" />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">{definition.label}</span>
-          <span
-            className="block truncate text-[11px] text-[var(--chef-muted)]"
-            title={definition.summary}
-          >
-            {definition.summary}
-          </span>
-        </span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{definition.label}</span>
 
         {linkable && (
           <span
@@ -474,19 +452,6 @@ function RecipeCardImpl({
           <X className="size-4" />
         </button>
       </header>
-
-      {/* Every step sees the audio as the steps ABOVE it left it, but the region is drawn
-          against the original input.  Once an earlier step has changed the duration the
-          two clocks have diverged, and the handles no longer mean what they look like. */}
-      {linkable && timesShifted && !step.bypass && (
-        <p className="flex items-start gap-1.5 border-b border-[var(--chef-border)] px-3 py-1.5 text-[10px] leading-snug text-[var(--chef-muted)]">
-          <TriangleAlert className="mt-px size-3 shrink-0" />
-          <span>
-            An earlier step changes the length, so these times are measured on the audio
-            entering <em>this</em> step — not on the Input waveform.
-          </span>
-        </p>
-      )}
 
       {quick.length > 0 && (
         <div className="flex flex-wrap gap-1 px-3 pt-2">
@@ -537,18 +502,6 @@ function RecipeCardImpl({
         )}
       </div>
 
-      {/* The filter's own picture: its frequency response, from the coefficients it runs. */}
-      {definition.id === 'filter' && <FilterResponse values={values} bypassed={step.bypass} />}
-
-      {definition.listen_for && (
-        <p className="flex items-start gap-1.5 border-t border-[var(--chef-border)] px-3 py-1.5 text-[11px] leading-snug text-[var(--chef-muted)]">
-          <Ear className="mt-px size-3 shrink-0 text-[var(--chef-accent-strong)]" />
-          <span>
-            <span className="font-medium text-[var(--chef-text)]">Listen for: </span>
-            {definition.listen_for}
-          </span>
-        </p>
-      )}
     </div>
   )
 }

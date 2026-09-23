@@ -6,14 +6,16 @@
  */
 
 import type {
+  ArrangeClip,
   BakeResult,
   BakeStats,
-  FilterResponse,
+  DoctorReport,
   OperationDef,
   ProcessGraphRequest,
   RecipeStep,
   SpectrogramData,
   UploadInfo,
+  WireClip,
   WireStep,
 } from './types'
 
@@ -61,6 +63,17 @@ export async function uploadFile(file: File): Promise<UploadInfo> {
 /** The backend only cares about op / bypass / params -- uid is a UI concern. */
 export function toWire(recipe: RecipeStep[]): WireStep[] {
   return recipe.map(({ op, bypass, params }) => ({ op, bypass, params }))
+}
+
+/** Arrange blocks as the backend's ClipSpec -- lane and uid are UI concerns. */
+export function toWireClips(clips: ArrangeClip[]): WireClip[] {
+  return clips.map(({ source, start, clipStart, clipEnd, gainDb }) => ({
+    source,
+    start,
+    clip_start: clipStart,
+    clip_end: clipEnd,
+    gain_db: gainDb,
+  }))
 }
 
 /**
@@ -113,20 +126,15 @@ export async function fetchSpectrogram(
 }
 
 /**
- * GET /filter/response -- the Filter card's frequency-response curve, evaluated by the
- * backend from the same coefficients the bake runs (backend/app/dsp/filters.py).
+ * GET /diagnose/file/{file_id} or /diagnose/bake/{bake_id} -- Signal Doctor's checklist
+ * (backend/app/dsp/doctor.py) and the recipe steps that fix what it found.
  */
-export async function fetchFilterResponse(
-  params: { mode: string; cutoff: number; order: string; q: number },
+export async function fetchDiagnosis(
+  kind: 'file' | 'bake',
+  id: string,
   signal?: AbortSignal,
-): Promise<FilterResponse> {
-  const query = new URLSearchParams({
-    mode: params.mode,
-    cutoff: String(params.cutoff),
-    order: params.order,
-    q: String(params.q),
-  })
-  const response = await fetch(`${BASE}/filter/response?${query}`, { signal })
+): Promise<DoctorReport> {
+  const response = await fetch(`${BASE}/diagnose/${kind}/${id}`, { signal })
   if (!response.ok) throw new Error(await detail(response))
   return response.json()
 }

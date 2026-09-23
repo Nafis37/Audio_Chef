@@ -62,8 +62,22 @@ class RecipeStep(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class ClipSpec(BaseModel):
+    """One block on an Arrange timeline (dsp/arrange.py).  Seconds throughout."""
+
+    source: str
+    start: float = 0.0          # where on the timeline the block begins
+    clip_start: float = 0.0     # the span of the source it plays ...
+    clip_end: float = 0.0       # ... 0 = to the source's end
+    gain_db: float = 0.0
+
+
 class SourceSpec(BaseModel):
-    """One loaded file and the recipe that belongs to it.
+    """One tab and the recipe that belongs to it: a loaded file, or an arrangement.
+
+    Exactly one of `file_id` / `clips` is set.  A file tab's audio is the decoded upload;
+    an Arrange tab's audio is the sum of its clips (dsp/arrange.py), each cut from another
+    tab's processed output.
 
     `id` is separate from `file_id` on purpose: the same upload can be loaded twice under
     two ids with two different chains -- a dry copy and a reverb copy, mixed together --
@@ -71,7 +85,8 @@ class SourceSpec(BaseModel):
     """
 
     id: str
-    file_id: str
+    file_id: Optional[str] = None
+    clips: Optional[list[ClipSpec]] = None
     recipe: list[RecipeStep] = Field(default_factory=list)
 
 
@@ -127,8 +142,19 @@ def _validate(request: ProcessRequest) -> None:
 
     seen: set[str] = set()
     for spec in request.sources:
+        if (spec.file_id is None) == (spec.clips is None):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source {spec.id!r} needs exactly one of file_id or clips.",
+            )
+        if spec.clips is not None:
+            if len(spec.clips) > config.MAX_CLIPS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Too many blocks -- an arrangement holds at most {config.MAX_CLIPS}.",
+                )
         # file_id comes from the client, so refuse anything that could escape storage.
-        if not spec.file_id.isalnum():
+        elif not spec.file_id.isalnum():
             raise HTTPException(status_code=400, detail="Malformed file_id.")
         if not _SOURCE_ID.fullmatch(spec.id):
             raise HTTPException(status_code=400, detail=f"Malformed source id {spec.id!r}.")
@@ -153,6 +179,8 @@ def process(request: ProcessRequest) -> Response:
     paths = {}
     rates = []
     for spec in request.sources:
+        if spec.file_id is None:        # an arrangement: its rate is its sources' rates
+            continue
         path = resolve_source(spec.file_id)
         if path is None:
             raise HTTPException(

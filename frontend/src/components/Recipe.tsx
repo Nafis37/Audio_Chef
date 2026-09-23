@@ -19,7 +19,6 @@ import { Trash2 } from 'lucide-react'
 import { memo, useMemo } from 'react'
 import { RecipeCard } from './RecipeCard'
 import { PRESETS, type Preset } from '../presets'
-import { TIME_SHIFTING_OPS } from '../regions'
 import type { OperationDef, ParamValue, RecipeStep } from '../types'
 
 interface Props {
@@ -137,11 +136,6 @@ function RecipeImpl({
               {recipe.map((step, index) => {
                 const definition = byId.get(step.op)
                 if (!definition) return null
-                // Anything above this step that is live and changes the duration puts the
-                // region's seconds and this step's seconds on different clocks.
-                const timesShifted = recipe
-                  .slice(0, index)
-                  .some((earlier) => !earlier.bypass && TIME_SHIFTING_OPS.has(earlier.op))
                 return (
                   <Draggable key={step.uid} draggableId={step.uid} index={index}>
                     {(drag, dragSnapshot) => (
@@ -152,7 +146,6 @@ function RecipeImpl({
                         drag={drag}
                         isDragging={dragSnapshot.isDragging}
                         active={step.uid === activeUid}
-                        timesShifted={timesShifted}
                         onSelect={onSelect}
                         onParamChange={onParamChange}
                         onParamsChange={onParamsChange}
