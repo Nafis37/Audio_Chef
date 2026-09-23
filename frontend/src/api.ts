@@ -11,6 +11,7 @@ import type {
   OperationDef,
   ProcessGraphRequest,
   RecipeStep,
+  SpectrogramData,
   UploadInfo,
   WireStep,
 } from './types'
@@ -83,8 +84,29 @@ export async function processGraph(
   const blob = await response.blob()
   return {
     url: URL.createObjectURL(blob),
+    bakeId: response.headers.get('X-Bake-Id'),
     bakeMs: Number(response.headers.get('X-Bake-Ms') ?? 0),
     duration: Number(response.headers.get('X-Output-Duration') ?? 0),
     stats: readStats(response),
+  }
+}
+
+/**
+ * GET /spectrogram/file/{file_id} or /spectrogram/bake/{bake_id} -- the hand-made
+ * spectrogram (backend/app/dsp/spectrogram.py) as a raw uint8 grid plus its shape.
+ */
+export async function fetchSpectrogram(
+  kind: 'file' | 'bake',
+  id: string,
+  signal?: AbortSignal,
+): Promise<SpectrogramData> {
+  const response = await fetch(`${BASE}/spectrogram/${kind}/${id}`, { signal })
+  if (!response.ok) throw new Error(await detail(response))
+  return {
+    rows: Number(response.headers.get('X-Spec-Rows')),
+    cols: Number(response.headers.get('X-Spec-Cols')),
+    fMin: Number(response.headers.get('X-Spec-Fmin')),
+    fMax: Number(response.headers.get('X-Spec-Fmax')),
+    pixels: new Uint8Array(await response.arrayBuffer()),
   }
 }

@@ -145,9 +145,9 @@ class Evaluator:
                 [step.model_dump() for step in spec.recipe],
                 ctx=ClipContext(self, source_id),
                 # A source chain is an intermediate: its output feeds an assemble card or
-                # the master chain, not the encoder.  Clamping here would flatten a peak
-                # that the very next step is about to pull down by 12 dB.  The final
-                # clamp happens once, in evaluate(), on the buffer that becomes the WAV.
+                # the master chain, not the encoder.  Turning it down here would change
+                # its balance against whatever it is mixed with next.  The fit to full
+                # scale happens once, in evaluate(), on the buffer that becomes the WAV.
                 clip=False,
             )
         finally:
@@ -240,9 +240,11 @@ def evaluate(
             rendered, fs, [step.model_dump() for step in master]
         )
     else:
-        final, master_report = np.clip(rendered, -1.0, 1.0), {
+        final, normalised_db = dsp_engine.fit_to_full_scale(rendered)
+        master_report = {
             "pre_clip_peak": round(float(np.max(np.abs(rendered))) if rendered.size else 0.0, 6),
             "clipped": int(np.count_nonzero(np.abs(rendered) > 1.0)) if rendered.size else 0,
+            "normalised_db": normalised_db,
             "steps_applied": 0,
             "steps_bypassed": 0,
             "truncated": False,

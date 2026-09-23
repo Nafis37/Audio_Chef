@@ -1,6 +1,54 @@
 """
 The recipe router
+=================
 This is the single entry point the API calls.  It holds
+
+  * OPERATIONS -- the catalogue.  Every tool the UI offers is one dict here: its id, label,
+    icon, plain-language texts, the Python handler, and the parameter schema.  GET /operations
+    serves this list (minus the handlers) and the frontend renders every palette entry and
+    every slider from it, so a parameter added here appears in the UI with no React change.
+
+  * run_recipe_measured() -- the fold.  A recipe is an ordered list of steps; the output is
+
+        y = f_n( ... f_2( f_1( x ) ) ... )          (bypassed f_i are the identity)
+
+    Order matters because the f_i do not commute: EQ-then-compressor squashes the boosted
+    band, compressor-then-EQ boosts a band that has already been levelled; reverb-then-trim
+    keeps the tail inside the cut, trim-then-reverb lets it ring over the new edge.
+
+Parameter contract -- clamp, never reject
+-----------------------------------------
+Every incoming value goes through _coerce():
+
+        missing / None / NaN / wrong type   ->  the schema default
+        number outside [min, max]           ->  clip(value, min, max)
+        enum not in options                 ->  the schema default
+        param with a `scale`                ->  the clamped value * scale
+
+(min / max / default are in the units the user SEES -- e.g. 0..100 % -- and the scale turns
+them into the units the DSP function wants -- 0..1.)  So a half-typed number in a text
+box, or a stale recipe from an older schema, still bakes.
+The only hard failure is an unknown op id (ValueError -> HTTP 400): there is no sensible
+default for "a tool that does not exist".
+
+Fit to full scale -- turn down, never clip
+------------------------------------------
+The WAV encoder needs |y| <= 1.  Hard-clamping to +-1 flattens every peak that went over,
+which is a nonlinearity: it smears energy across the whole spectrum and sounds like
+crackle -- the opposite of what an EQ boost or an echo was meant to show.  Instead, when
+the peak is over full scale the WHOLE buffer is scaled down by one constant:
+
+        peak = max |y[n]|
+        g    = HEADROOM / peak    if peak > 1,   else 1         (HEADROOM = 0.98)
+        y   <- g * y                      normalised_db = 20 log10(g)   (<= 0)
+
+A constant gain is linear, so the sound is unchanged apart from being quieter.  The fold
+records what it saw first
+
+        pre_clip_peak = max |y[n]|            clipped = #{ n : |y[n]| > 1 }
+
+(`clipped` = how many samples WOULD have clipped) -- that is how ListenStats can say "the
+recipe peaked at +4.2 dB and was turned down 4.4 dB" instead of silently getting quieter.
 """
 
 from __future__ import annotations
@@ -16,30 +64,54 @@ from .editor import splice, trim
 from .eq import equalizer
 from .noise import noise_reduce
 from .speed_pitch import speed_pitch
+from .voice_changer import voice_changer
 
 
 # --------------------------------------------------------------------------------------
 # Parameter schema helpers.  A param is a plain dict so it can be sent to the browser
 # as-is; these constructors just keep the definitions below readable.
+#
+# Besides the numbers the DSP needs (min / max / step / default), every param carries
+# what a person needs to use it:
+#
+#   help       one plain sentence, shown as the control's tooltip
+#   advanced   True -> tucked into the card's "Advanced" section, out of the way
+#   show_when  {"mode": ["reverb"]} -> only shown while another param has one of those
+#              values (a knob that does nothing in the current mode is hidden, not greyed)
+#   scale      the DSP value is  shown_value * scale.  Lets a 0..1 mix be shown and typed
+#              as 0..100 % while echo()/reverb() keep their natural units.  _coerce()
+#              applies it, so no handler ever sees a percentage.
 # --------------------------------------------------------------------------------------
-def _num(name, label, default, lo, hi, step=0.1, unit="", control="slider"):
+def _num(name, label, default, lo, hi, step=0.1, unit="", control="slider", *,
+         help="", advanced=False, show_when=None, scale=None):
     return {
         "name": name, "label": label, "type": "float", "default": default,
         "min": lo, "max": hi, "step": step, "unit": unit, "control": control,
+        "help": help, "advanced": advanced, "show_when": show_when, "scale": scale,
     }
 
 
-def _enum(name, label, default, options):
+def _pct(name, label, default, *, lo=0.0, hi=100.0, help="", advanced=False, show_when=None):
+    """A 0..1 quantity shown as 0..100 %."""
+    return _num(name, label, default, lo, hi, 1.0, "%", help=help, advanced=advanced,
+                show_when=show_when, scale=0.01)
+
+
+def _enum(name, label, default, options, *, option_labels=None, help="", advanced=False,
+          show_when=None):
     return {"name": name, "label": label, "type": "enum", "default": default,
-            "options": options, "unit": "", "control": "select"}
+            "options": options, "option_labels": option_labels or {}, "unit": "",
+            "control": "select", "help": help, "advanced": advanced,
+            "show_when": show_when, "scale": None}
 
 
-def _bool(name, label, default):
+def _bool(name, label, default, *, help="", advanced=False, show_when=None):
     return {"name": name, "label": label, "type": "bool", "default": default,
-            "unit": "", "control": "toggle"}
+            "unit": "", "control": "toggle", "help": help, "advanced": advanced,
+            "show_when": show_when, "scale": None}
 
 
-def _source(name, label):
+def _source(name, label, *, help=""):
     """A reference to another loaded source.
 
     The only parameter whose OPTIONS this catalogue cannot supply: which files are loaded
@@ -48,20 +120,13 @@ def _source(name, label):
     a source id, validated for existence by the graph walk rather than by _coerce().
     """
     return {"name": name, "label": label, "type": "source", "default": "",
-            "options": None, "unit": "", "control": "source"}
+            "options": None, "unit": "", "control": "source", "help": help,
+            "advanced": False, "show_when": None, "scale": None}
 
 
 # --------------------------------------------------------------------------------------
 # Adapters: some ops need a bit of dispatch before reaching the DSP function.
 # --------------------------------------------------------------------------------------
-def _echo_reverb_op(x, fs, mode="echo", delay=0.3, feedback=0.4, room_size=0.5,
-                    decay=2.0, mix=0.5):
-    """One card covering both room effects; add it twice to chain echo INTO reverb."""
-    if mode == "reverb":
-        return reverb(x, fs, room_size=room_size, decay=decay, mix=mix)
-    return echo(x, fs, delay=delay, feedback=feedback, mix=mix)
-
-
 def _editor_op(x, fs, mode="trim", start=0.0, end=0.0):
     """Trim keeps the selected region; splice removes it."""
     if mode == "splice":
@@ -85,117 +150,339 @@ def _assemble_op(x, fs, ctx, source="", mode="mix", position=0.0,
     return mixer.mix_at(x, clip, fs, position=position, gain_db=gain)
 
 
+def _echo_reverb_legacy(x, fs, mode="echo", delay=0.3, feedback=0.4, room_size=0.5,
+                        decay=2.0, mix=0.5):
+    """The old combined card, before echo and reverb became two.  Hidden from the palette;
+    kept so a recipe saved against the old catalogue still bakes."""
+    if mode == "reverb":
+        return reverb(x, fs, room_size=room_size, decay=decay, mix=mix)
+    return echo(x, fs, delay=delay, feedback=feedback, mix=mix)
+
+
 # --------------------------------------------------------------------------------------
-# The catalogue.  `icon` values are lucide-react icon names used by the palette.
+# The catalogue.
+#
+# Op-level fields, besides id / label / handler / params:
+#   icon        lucide-react icon name used by the palette and the card
+#   category    palette group heading
+#   summary     what it does, in one plain sentence -- the card's subtitle
+#   how         the technique in one line -- shown next to the maths
+#   listen_for  what a listener should hear and see change -- the card's footer
+#   quick       one-click settings: {"name": {param: shown_value, ...}}.  Names only the
+#               params it moves; everything else keeps its current value.
+#   hidden      served (so old recipes still render and bake) but not offered in the palette
+#
+# The defaults are deliberately NOT neutral: dropping a card in should make an audible,
+# visible difference straight away, and the quick settings go from there.
 # --------------------------------------------------------------------------------------
 OPERATIONS: list[dict[str, Any]] = [
+    # ---- Clean up --------------------------------------------------------------------
     {
         "id": "noise_remover",
         "label": "Noise Remover",
         "icon": "Waves",
-        "description": "Spectral subtraction: learns a noise profile from a quiet region "
-                       "and subtracts it from every STFT frame.",
+        "category": "Clean up",
+        "summary": "Removes steady background hiss, hum and fan noise.",
+        "how": "Spectral subtraction: a per-frequency noise level is subtracted from every "
+               "STFT frame, with the gain smoothed over time.",
+        "listen_for": "The hiss in the pauses drops away. On the spectrogram the grey haze "
+                      "between words goes dark while the voice stripes stay.",
         "handler": noise_reduce,
+        "quick": {
+            "Subtle": {"amount": 1.2, "floor": 10},
+            "Strong": {"amount": 2.0, "floor": 5},
+            "Extreme": {"amount": 3.5, "floor": 2},
+        },
         "params": [
-            _num("amount", "Reduction", 1.5, 0.0, 4.0, 0.1, "x"),
-            _num("floor", "Spectral floor", 0.05, 0.0, 0.5, 0.01, ""),
-            _num("noise_start", "Profile start", 0.0, 0.0, 30.0, 0.1, "s"),
-            _num("noise_end", "Profile end", 0.5, 0.05, 30.0, 0.05, "s"),
+            _num("amount", "Strength", 2.0, 0.0, 4.0, 0.1, "x",
+                 help="How hard to push the noise down. 1x removes the average noise level; "
+                      "more also catches its louder moments, but too much starts eating the voice."),
+            _enum("profile", "Find the noise", "auto", ["auto", "region"],
+                  option_labels={"auto": "Automatically", "region": "From a part I mark"},
+                  help="Automatically: uses the quietest moments of every frequency band, so any "
+                       "recording with pauses works. From a part I mark: drag the amber region on "
+                       "the Input waveform over a stretch that is ONLY noise."),
+            _num("noise_start", "Noise-only from", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 help="Start of the noise-only stretch (drag the amber region instead).",
+                 show_when={"profile": ["region"]}),
+            _num("noise_end", "Noise-only to", 0.5, 0.05, 600.0, 0.01, "s", "number",
+                 help="End of the noise-only stretch.",
+                 show_when={"profile": ["region"]}),
+            _pct("floor", "Leave a little behind", 5, hi=50,
+                 help="Never cut any band below this much of its original level. A small "
+                      "remainder masks the watery 'musical noise' that full removal leaves.",
+                 advanced=True),
         ],
     },
+    # ---- Tone & level ----------------------------------------------------------------
     {
         "id": "equalizer",
-        "label": "Audio Equalizer",
+        "label": "Equalizer",
         "icon": "SlidersHorizontal",
-        "description": "Three peaking biquad bands (RBJ cookbook coefficients) in series.",
+        "category": "Tone & level",
+        "summary": "Bass, mid and treble tone controls.",
+        "how": "Low shelf, peaking bell and high shelf biquads in series (RBJ cookbook).",
+        "listen_for": "Bass up: fuller and boomier; treble up: crisper and brighter. The "
+                      "bottom or top band of the spectrogram lights up.",
         "handler": equalizer,
+        "quick": {
+            "Subtle": {"bass_gain": 3, "mid_gain": 0, "treble_gain": 3},
+            "Strong": {"bass_gain": 6, "mid_gain": 0, "treble_gain": 6},
+            "Extreme": {"bass_gain": 15, "mid_gain": -6, "treble_gain": 15},
+            "Telephone": {"bass_gain": -24, "mid_gain": 8, "treble_gain": -24,
+                          "bass_freq": 400, "treble_freq": 3000},
+        },
         "params": [
-            _num("low_gain", "Low gain", 0.0, -24.0, 24.0, 0.5, "dB"),
-            _num("low_freq", "Low freq", 120.0, 20.0, 500.0, 1.0, "Hz"),
-            _num("mid_gain", "Mid gain", 0.0, -24.0, 24.0, 0.5, "dB"),
-            _num("mid_freq", "Mid freq", 1000.0, 200.0, 5000.0, 10.0, "Hz"),
-            _num("high_gain", "High gain", 0.0, -24.0, 24.0, 0.5, "dB"),
-            _num("high_freq", "High freq", 6000.0, 2000.0, 16000.0, 50.0, "Hz"),
-            _num("q", "Q", 1.0, 0.1, 10.0, 0.1, ""),
+            _num("bass_gain", "Bass", 6.0, -24.0, 24.0, 0.5, "dB",
+                 help="Boost or cut everything below the bass corner (200 Hz by default)."),
+            _num("mid_gain", "Mid", 0.0, -24.0, 24.0, 0.5, "dB",
+                 help="Boost or cut a band around the mid frequency — where speech is clearest."),
+            _num("treble_gain", "Treble", 6.0, -24.0, 24.0, 0.5, "dB",
+                 help="Boost or cut everything above the treble corner (4 kHz by default)."),
+            _num("bass_freq", "Bass corner", 200.0, 40.0, 1000.0, 5.0, "Hz",
+                 help="Below this the bass control acts fully.", advanced=True),
+            _num("mid_freq", "Mid frequency", 1000.0, 200.0, 6000.0, 10.0, "Hz",
+                 help="Centre of the mid band.", advanced=True),
+            _num("q", "Mid width (Q)", 1.0, 0.2, 10.0, 0.1, "",
+                 help="Higher = a narrower mid band.", advanced=True),
+            _num("treble_freq", "Treble corner", 4000.0, 1000.0, 16000.0, 50.0, "Hz",
+                 help="Above this the treble control acts fully.", advanced=True),
         ],
     },
     {
-        "id": "echo_reverb",
-        "label": "Echo & Reverb Studio",
-        "icon": "AudioLines",
-        "description": "Convolution with a synthesised impulse response: a tapped delay line "
-                       "for echo, a decaying-noise room for reverb.",
-        "handler": _echo_reverb_op,
+        "id": "compressor",
+        "label": "Compressor",
+        "icon": "Minimize2",
+        "category": "Tone & level",
+        "summary": "Evens out the volume: loud parts down, quiet parts up.",
+        "how": "Peak envelope follower feeding a soft-knee dB gain computer, with auto-makeup.",
+        "listen_for": "Quiet words become as loud as the loud ones. The waveform turns from "
+                      "spiky to a solid block at the same height.",
+        "handler": compressor,
+        "quick": {
+            "Subtle": {"threshold": -18, "ratio": 2.5},
+            "Strong": {"threshold": -30, "ratio": 6},
+            "Extreme": {"threshold": -45, "ratio": 20},
+        },
         "params": [
-            _enum("mode", "Mode", "echo", ["echo", "reverb"]),
-            _num("delay", "Delay", 0.3, 0.01, 2.0, 0.01, "s"),
-            _num("feedback", "Feedback", 0.4, 0.0, 0.95, 0.01, ""),
-            _num("room_size", "Room size", 0.5, 0.0, 1.0, 0.01, ""),
-            _num("decay", "Decay (RT60)", 2.0, 0.1, 10.0, 0.1, "s"),
-            _num("mix", "Dry / wet", 0.5, 0.0, 1.0, 0.01, ""),
+            _num("threshold", "Start squashing at", -30.0, -60.0, 0.0, 0.5, "dB",
+                 help="Anything louder than this gets turned down. Lower = more of the audio "
+                      "is affected."),
+            _num("ratio", "Squash ratio", 6.0, 1.0, 20.0, 0.1, ":1",
+                 help="How hard. At 6:1, sound that is 6 dB over the threshold comes out only "
+                      "1 dB over."),
+            _bool("auto_makeup", "Auto-makeup", True,
+                  help="Lift everything back up so the loudest peak is where it started. This "
+                       "is what makes the quiet parts come UP."),
+            _num("attack", "Attack", 5.0, 0.1, 200.0, 0.1, "ms",
+                 help="How quickly it reacts to a sudden loud sound.", advanced=True),
+            _num("release", "Release", 150.0, 5.0, 1000.0, 1.0, "ms",
+                 help="How quickly it lets go once things get quiet again.", advanced=True),
+            _num("knee", "Knee", 6.0, 0.0, 24.0, 0.5, "dB",
+                 help="How gently it eases in around the threshold. 0 = a hard corner.",
+                 advanced=True),
+            _num("makeup", "Extra gain", 0.0, 0.0, 24.0, 0.5, "dB",
+                 help="A fixed boost added on top, after auto-makeup.", advanced=True),
         ],
     },
+    # ---- Space -----------------------------------------------------------------------
+    {
+        "id": "echo",
+        "label": "Echo",
+        "icon": "Repeat",
+        "category": "Space",
+        "summary": "Distinct repeats, like shouting across a canyon.",
+        "how": "Convolution with a tapped delay line: h[kD] = g^k (the feedback comb, unrolled).",
+        "listen_for": "Each word comes back again and again, quieter each time. The "
+                      "waveform shows smaller copies trailing every burst.",
+        "handler": echo,
+        "quick": {
+            "Slapback": {"delay": 0.12, "feedback": 15, "mix": 40},
+            "Canyon": {"delay": 0.35, "feedback": 50, "mix": 60},
+            "Endless": {"delay": 0.5, "feedback": 80, "mix": 75},
+        },
+        "params": [
+            _num("delay", "Delay", 0.35, 0.02, 2.0, 0.01, "s",
+                 help="The gap between one repeat and the next."),
+            _pct("feedback", "Repeats", 50, hi=95,
+                 help="How much of each repeat survives into the next. Higher = more, "
+                      "longer-lasting repeats."),
+            _pct("mix", "Wet", 60,
+                 help="How loud the repeats are against the original."),
+        ],
+    },
+    {
+        "id": "reverb",
+        "label": "Reverb",
+        "icon": "AudioLines",
+        "category": "Space",
+        "summary": "Puts the sound in a room, from a small booth to a cathedral.",
+        "how": "Convolution with a synthesised room: early reflections over exponentially "
+               "decaying noise (RT60).",
+        "listen_for": "A smooth tail rings on after each word. On the spectrogram the "
+                      "stripes smear to the right instead of stopping sharply.",
+        "handler": reverb,
+        "quick": {
+            "Small room": {"room_size": 30, "decay": 0.6, "mix": 25},
+            "Hall": {"room_size": 70, "decay": 2.5, "mix": 45},
+            "Cathedral": {"room_size": 100, "decay": 6.0, "mix": 65},
+        },
+        "params": [
+            _pct("room_size", "Room size", 70,
+                 help="Spreads the first reflections further apart — the sense of how big the "
+                      "space is."),
+            _num("decay", "Tail length", 2.5, 0.1, 10.0, 0.1, "s",
+                 help="How long the room keeps ringing (RT60: the time to fall by 60 dB)."),
+            _pct("mix", "Wet", 45,
+                 help="How much room you hear against the original."),
+        ],
+    },
+    # ---- Time & pitch ----------------------------------------------------------------
+    {
+        "id": "speed_pitch",
+        "label": "Speed & Pitch",
+        "icon": "Gauge",
+        "category": "Time & pitch",
+        "summary": "Change how fast it plays and how high it sounds — separately.",
+        "how": "Phase-vocoder time stretch plus linear-interpolation resampling.",
+        "listen_for": "Faster speech at the same voice (Keep pitch on), or a sped-up tape "
+                      "(off). The output waveform is shorter or longer than the input.",
+        "handler": speed_pitch,
+        "quick": {
+            "Slow-mo": {"speed": 0.6, "semitones": 0, "preserve_pitch": True},
+            "Fast talk": {"speed": 1.5, "semitones": 0, "preserve_pitch": True},
+            "Tape speed-up": {"speed": 1.3, "semitones": 0, "preserve_pitch": False},
+            "Octave down": {"speed": 1.0, "semitones": -12},
+        },
+        "params": [
+            _num("speed", "Speed", 1.5, 0.25, 4.0, 0.01, "x",
+                 help="Playback rate. 2x = half the length."),
+            _bool("preserve_pitch", "Keep pitch", True,
+                  help="On: only the length changes. Off: like a tape played faster — the "
+                       "pitch goes up with the speed."),
+            _num("semitones", "Pitch", 0.0, -24.0, 24.0, 0.5, "st",
+                 help="Move every note up or down without changing the length. 12 semitones "
+                      "= one octave."),
+        ],
+    },
+    # ---- Voice -----------------------------------------------------------------------
+    {
+        "id": "voice_changer",
+        "label": "Voice Changer",
+        "icon": "Mic",
+        "category": "Voice",
+        "summary": "Turn a voice into a chipmunk, a monster, a robot or a whisper.",
+        "how": "The STFT rebuilt with a new phase: bins shifted in frequency, a fixed pulse "
+               "per frame, or random phase.",
+        "listen_for": "Chipmunk/monster: the stripes on the spectrogram move up/down. Robot: "
+                      "they snap to evenly spaced lines. Whisper: they dissolve into haze.",
+        "handler": voice_changer,
+        "params": [
+            _enum("mode", "Voice", "chipmunk", ["chipmunk", "monster", "robot", "whisper"],
+                  option_labels={"chipmunk": "Chipmunk", "monster": "Monster",
+                                 "robot": "Robot", "whisper": "Whisper"},
+                  help="Which character to turn the voice into."),
+            _num("semitones", "How far", 7.0, 1.0, 12.0, 0.5, "st",
+                 help="How many semitones up (chipmunk) or down (monster). 12 = one octave.",
+                 show_when={"mode": ["chipmunk", "monster"]}),
+            _num("robot_freq", "Robot buzz", 100.0, 40.0, 300.0, 1.0, "Hz",
+                 help="The one note the robot speaks on. Lower = deeper.",
+                 show_when={"mode": ["robot"]}),
+            _pct("mix", "Wet", 100,
+                 help="Blend with the original voice.", advanced=True),
+        ],
+    },
+    # ---- Edit ------------------------------------------------------------------------
     {
         "id": "editor",
-        "label": "Mini Audio Editor",
+        "label": "Cut & Trim",
         "icon": "Scissors",
-        "description": "Trim to a region or splice one out, by numpy slicing.",
+        "category": "Edit",
+        "summary": "Keep only a part of the clip, or cut a part out.",
+        "how": "numpy slicing and concatenation, with 5 ms fades at every cut.",
+        "listen_for": "The output is shorter. Drag the green region on the Input waveform "
+                      "to choose the part.",
         "handler": _editor_op,
         "params": [
-            _enum("mode", "Mode", "trim", ["trim", "splice"]),
-            _num("start", "Start", 0.0, 0.0, 600.0, 0.01, "s", "number"),
-            _num("end", "End", 0.0, 0.0, 600.0, 0.01, "s", "number"),
+            _enum("mode", "Action", "trim", ["trim", "splice"],
+                  option_labels={"trim": "Keep the selection", "splice": "Cut it out"},
+                  help="Keep only the selected part, or remove it and join the two sides."),
+            _num("start", "From", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 help="Start of the selection (or drag the green region)."),
+            _num("end", "To", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 help="End of the selection. 0 = the end of the file."),
         ],
     },
     {
         "id": "assemble",
         "label": "Assemble Clip",
         "icon": "Layers",
-        "description": "Take a span of another source -- after ITS recipe has run -- and "
-                       "overlay, insert or append it here.",
+        "category": "Edit",
+        "summary": "Bring in a piece of another loaded file.",
+        "how": "Take a span of another source — after ITS recipe has run — and overlay, "
+               "insert or append it here.",
+        "listen_for": "The other clip plays at the chosen point.",
         "handler": _assemble_op,
         # The flag run_recipe_measured looks for before handing a handler the graph.
         "needs_ctx": True,
         "params": [
-            _source("source", "Clip from"),
-            _enum("mode", "Placement", "mix", ["mix", "insert", "append"]),
-            _num("position", "Place at", 0.0, 0.0, 600.0, 0.01, "s", "number"),
-            _num("clip_start", "Clip start", 0.0, 0.0, 600.0, 0.01, "s", "number"),
-            _num("clip_end", "Clip end", 0.0, 0.0, 600.0, 0.01, "s", "number"),
-            _num("gain", "Clip gain", 0.0, -60.0, 12.0, 0.5, "dB"),
+            _source("source", "Clip from", help="Which loaded file to take the clip from."),
+            _enum("mode", "Placement", "mix", ["mix", "insert", "append"],
+                  option_labels={"mix": "Layer on top", "insert": "Insert",
+                                 "append": "Add at the end"},
+                  help="Layer: both play at once. Insert: split this clip open and push the rest "
+                       "later. Add at the end: join it on after."),
+            _num("position", "Place at", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 help="Where in THIS clip it goes.",
+                 show_when={"mode": ["mix", "insert"]}),
+            _num("clip_start", "Clip from", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 help="Start of the piece to take from the other file."),
+            _num("clip_end", "Clip to", 0.0, 0.0, 600.0, 0.01, "s", "number",
+                 help="End of the piece. 0 = to its end."),
+            _num("gain", "Clip volume", 0.0, -60.0, 12.0, 0.5, "dB",
+                 help="Turn the clip up or down before placing it.", advanced=True),
         ],
     },
+    # ---- Hidden ----------------------------------------------------------------------
     {
-        "id": "speed_pitch",
-        "label": "Speed & Pitch Lab",
-        "icon": "Gauge",
-        "description": "Phase-vocoder time stretch plus manual linear-interpolation resampling.",
-        "handler": speed_pitch,
+        "id": "echo_reverb",
+        "label": "Echo & Reverb (old)",
+        "icon": "AudioLines",
+        "category": "Space",
+        "summary": "The old combined card — use Echo or Reverb instead.",
+        "how": "Either of the two convolutions, chosen by mode.",
+        "listen_for": "",
+        "hidden": True,
+        "handler": _echo_reverb_legacy,
         "params": [
-            _num("speed", "Speed", 1.0, 0.25, 4.0, 0.01, "x"),
-            _num("semitones", "Pitch", 0.0, -24.0, 24.0, 0.5, "st"),
-            _bool("preserve_pitch", "Keep pitch when changing speed", True),
-        ],
-    },
-    {
-        "id": "compressor",
-        "label": "Simple Compressor",
-        "icon": "Minimize2",
-        "description": "One-pole envelope follower feeding a dB-domain gain computer.",
-        "handler": compressor,
-        "params": [
-            _num("threshold", "Threshold", -20.0, -60.0, 0.0, 0.5, "dB"),
-            _num("ratio", "Ratio", 4.0, 1.0, 20.0, 0.1, ":1"),
-            _num("attack", "Attack", 10.0, 0.1, 200.0, 0.1, "ms"),
-            _num("release", "Release", 100.0, 5.0, 1000.0, 1.0, "ms"),
-            _num("knee", "Knee", 6.0, 0.0, 24.0, 0.5, "dB"),
-            _num("makeup", "Makeup gain", 0.0, 0.0, 24.0, 0.5, "dB"),
+            _enum("mode", "Mode", "echo", ["echo", "reverb"]),
+            _num("delay", "Delay", 0.3, 0.01, 2.0, 0.01, "s", show_when={"mode": ["echo"]}),
+            _num("feedback", "Feedback", 0.4, 0.0, 0.95, 0.01, "", show_when={"mode": ["echo"]}),
+            _num("room_size", "Room size", 0.5, 0.0, 1.0, 0.01, "", show_when={"mode": ["reverb"]}),
+            _num("decay", "Decay (RT60)", 2.0, 0.1, 10.0, 0.1, "s", show_when={"mode": ["reverb"]}),
+            _num("mix", "Dry / wet", 0.5, 0.0, 1.0, 0.01, ""),
         ],
     },
 ]
 
 # id -> definition, for O(1) lookup while baking.
 _BY_ID = {op["id"]: op for op in OPERATIONS}
+
+# Target peak after fit_to_full_scale(): a hair under 1 so the 16-bit encoder's rounding
+# can never land on the wrapping value.
+HEADROOM = 0.98
+
+
+def fit_to_full_scale(y: np.ndarray) -> tuple[np.ndarray, float]:
+    """Scale y down by one constant if it peaks over 1 (module docstring).
+
+    Returns (buffer, gain applied in dB) -- 0.0 when nothing had to change.
+    """
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    if peak <= 1.0:
+        return y, 0.0
+    g = HEADROOM / peak
+    return y * g, round(20.0 * np.log10(g), 2)
 
 
 def operations_schema() -> list[dict[str, Any]]:
@@ -204,9 +491,11 @@ def operations_schema() -> list[dict[str, Any]]:
 
 
 def _coerce(param: dict[str, Any], value: Any) -> Any:
-    """Validate one incoming parameter against its schema entry (clamp, never reject)."""
+    """Validate one incoming parameter against its schema entry (clamp, never reject),
+    then convert it from the units shown in the UI to the units the handler takes."""
+    scale = param.get("scale") or 1.0
     if value is None:
-        return param["default"]
+        value = param["default"]
     if param["type"] == "bool":
         return bool(value)
     if param["type"] == "enum":
@@ -220,10 +509,10 @@ def _coerce(param: dict[str, Any], value: Any) -> Any:
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return param["default"]
+        number = float(param["default"])
     if not np.isfinite(number):
-        return param["default"]
-    return float(np.clip(number, param["min"], param["max"]))
+        number = float(param["default"])
+    return float(np.clip(number, param["min"], param["max"])) * scale
 
 
 def run_recipe_measured(
@@ -233,7 +522,7 @@ def run_recipe_measured(
     """Apply every non-bypassed operation in order, and report what the fold did.
 
     Same fold as run_recipe(), but it also returns the handful of facts only this loop
-    can see -- how much headroom was exceeded before the final clamp, and whether the
+    can see -- how much headroom was exceeded before the final fit to full scale, and whether the
     recipe ran to the end -- so the UI can explain the output instead of just drawing it.
 
     `ctx` is the graph handle for operations that reach outside their own buffer (see
@@ -241,11 +530,10 @@ def run_recipe_measured(
     clip position to be relative to.
 
     `clip` is False for an INTERMEDIATE chain -- one whose output feeds another chain
-    rather than the WAV encoder.  The clamp below exists because a 16-bit file would wrap
-    and click, which is a fact about the output format, not about the audio: clamping a
-    buffer that a later step is about to turn down by 12 dB would throw away headroom
-    that was still recoverable.  The measurement above it is taken either way, so nothing
-    is lost from the report.
+    rather than the WAV encoder.  The fit to full scale below exists because a 16-bit file
+    would wrap and click, which is a fact about the output format, not about the audio:
+    turning down a buffer that a later step is about to mix with something else would
+    change the balance of the mix.  The measurement is taken either way.
 
     Raises ValueError on an unknown op id, which the router turns into an HTTP 400.
     """
@@ -280,24 +568,26 @@ def run_recipe_measured(
             truncated = True
             break
 
-    # Measure the overshoot BEFORE clamping: once the samples are clipped the evidence
-    # that they ever went past full scale is gone, and the flat tops in the output
-    # waveform would have no explanation.
+    # Measure the overshoot BEFORE fitting, so the report can say how far over it went.
     pre_clip_peak = float(np.max(np.abs(y))) if y.size else 0.0
     clipped = int(np.count_nonzero(np.abs(y) > 1.0)) if y.size else 0
+
+    # Effects (especially EQ boosts, echo and makeup gain) can push samples past full
+    # scale.  Turn the whole buffer down to fit -- unless it is on its way into another
+    # chain rather than into a file.
+    normalised_db = 0.0
+    if clip:
+        y, normalised_db = fit_to_full_scale(y)
 
     report = {
         "pre_clip_peak": round(pre_clip_peak, 6),
         "clipped": clipped,
+        "normalised_db": normalised_db,
         "steps_applied": applied,
         "steps_bypassed": bypassed,
         "truncated": truncated,
     }
-
-    # Effects (especially echo, reverb and makeup gain) can push samples past full scale,
-    # which would wrap around and click when written to a 16-bit WAV.  Clamp to +-1 --
-    # unless this buffer is on its way into another chain rather than into a file.
-    return (np.clip(y, -1.0, 1.0) if clip else y), report
+    return y, report
 
 
 def run_recipe(x: np.ndarray, fs: int, recipe: list[dict[str, Any]]) -> np.ndarray:

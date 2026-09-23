@@ -5,6 +5,8 @@
  * parameters live in column 2 and the maths lived only in backend docstrings.  This fills
  * the empty bottom of the Listen column with the answer:
  *
+ *   0. IN ONE SENTENCE -- the three or four biggest differences, in plain words, for
+ *      anyone who will not read a table ("4.1 dB louder, brighter, 1.2 s shorter").
  *   1. MEASUREMENTS -- input vs output peak / RMS / crest / duration / DC / centroid,
  *      measured in numpy by backend/app/dsp/analysis.py and delivered on the same
  *      response as the audio (the X-Bake-Stats header), so there is no second decode and
@@ -12,6 +14,9 @@
  *   2. WHY IT LOOKS LIKE THIS -- one equation per active step (see explain.ts) plus the
  *      notices for things the engine otherwise does silently: clipping at +-1, a recipe
  *      that emptied the buffer, a duration or loudness that moved.
+ *
+ * The table and the maths are folded into <details>: the sentence and the notices are
+ * what a demo audience reads; the rest is one click away for whoever asks "how?".
  *
  * Presentational only: every number arrives as a prop.
  */
@@ -119,6 +124,45 @@ function buildRows(input: Measures, output: Measures): Row[] {
 }
 
 /**
+ * The headline: only differences big enough to hear, largest first, in plain words.
+ * Thresholds are roughly "just noticeable": ~1 dB of level, ~10% of centroid, ~3 dB of
+ * crest, ~50 ms of length.
+ */
+function buildSummary(stats: BakeStats): string {
+  const { input, output } = stats
+  const parts: string[] = []
+
+  const loudness = output.rms_db - input.rms_db
+  if (input.rms_db > -119.99 && Math.abs(loudness) >= 1) {
+    parts.push(`${Math.abs(loudness).toFixed(1)} dB ${loudness > 0 ? 'louder' : 'quieter'}`)
+  }
+  if (input.centroid_hz > 0 && output.centroid_hz > 0) {
+    const move = output.centroid_hz / input.centroid_hz - 1
+    if (Math.abs(move) >= 0.1) {
+      parts.push(
+        `${move > 0 ? 'brighter' : 'darker'} (energy ${Math.abs(move * 100).toFixed(0)}% ` +
+          `${move > 0 ? 'higher' : 'lower'} in pitch)`,
+      )
+    }
+  }
+  const crest = output.crest_db - input.crest_db
+  if (Math.abs(crest) >= 3) {
+    parts.push(crest < 0 ? 'more even in level' : 'punchier, more dynamic')
+  }
+  const length = output.duration - input.duration
+  if (Math.abs(length) >= 0.05) {
+    parts.push(`${Math.abs(length).toFixed(2)} s ${length > 0 ? 'longer' : 'shorter'}`)
+  }
+
+  if (parts.length === 0) {
+    return 'Level, brightness and length are about the same — listen with A/B or look at the ' +
+      'spectrogram for what changed.'
+  }
+  const sentence = parts.join(', ')
+  return `The output is ${sentence}.`
+}
+
+/**
  * The notices that turn a number into an explanation.  These are the things the engine
  * does silently -- clamping, an emptied buffer, a big level or spectrum move -- so each
  * one names the cause rather than leaving the user to infer it from the picture.
@@ -150,14 +194,24 @@ function buildNotices(stats: BakeStats, recipe: RecipeStep[], operations: Operat
 
   if (stats.clipped > 0) {
     const over = (20 * Math.log10(stats.pre_clip_peak)).toFixed(1)
-    notices.push({
-      tone: 'warn',
-      text:
-        `${stats.clipped.toLocaleString()} samples went past full scale (the recipe peaked at ` +
-        `${stats.pre_clip_peak.toFixed(3)}, i.e. +${over} dB) and were clamped to ±1. The flat tops ` +
-        `in the output waveform are that clamp, and clipping is a nonlinearity — it smears energy ` +
-        `across the whole spectrum.`,
-    })
+    const down = stats.normalised_db ?? 0
+    notices.push(
+      down < 0
+        ? {
+            tone: 'info',
+            text:
+              `The recipe peaked at +${over} dB — past full scale — so the whole output was turned ` +
+              `down ${Math.abs(down).toFixed(1)} dB to fit instead of clipping. One constant gain is ` +
+              `linear, so nothing is distorted; it is just quieter than it would otherwise be.`,
+          }
+        : {
+            tone: 'warn',
+            text:
+              `${stats.clipped.toLocaleString()} samples went past full scale (the recipe peaked at ` +
+              `+${over} dB) and were clamped to ±1. Clipping is a nonlinearity — it smears energy ` +
+              `across the whole spectrum.`,
+          },
+    )
   }
 
   if (Math.abs(output.duration - input.duration) > 0.005) {
@@ -236,8 +290,15 @@ function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
         </p>
       ) : (
         <div className="space-y-4 px-4 pb-4 pt-3.5">
+          {/* --- 0. The headline ------------------------------------------------------- */}
+          <p className="text-sm font-medium leading-snug">{buildSummary(stats)}</p>
+
           {/* --- 1. The measurements ------------------------------------------------ */}
-          <table className="w-full border-collapse text-xs">
+          <details open className="group">
+            <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wider text-[var(--chef-muted)] hover:text-[var(--chef-text)]">
+              The numbers
+            </summary>
+          <table className="mt-2 w-full border-collapse text-xs">
             <thead>
               <tr className="text-[11px] uppercase tracking-wider text-[var(--chef-muted)]">
                 <th className="pb-1.5 text-left font-medium">Measure</th>
@@ -266,6 +327,7 @@ function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
               ))}
             </tbody>
           </table>
+          </details>
 
           {/* --- 2. The notices: what the numbers above mean ------------------------- */}
           {buildNotices(stats, recipe, operations).map((notice) => (
@@ -286,10 +348,10 @@ function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
 
           {/* --- 3. The maths, one line per step that actually ran ------------------- */}
           {active.length > 0 && (
-            <div className="space-y-2.5 border-t border-[var(--chef-border)] pt-3">
-              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-[var(--chef-muted)]">
+            <details className="space-y-2.5 border-t border-[var(--chef-border)] pt-3">
+              <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wider text-[var(--chef-muted)] hover:text-[var(--chef-text)]">
                 The maths, step by step
-              </h3>
+              </summary>
               {active.map((step, index) => {
                 const op = operations.find((candidate) => candidate.id === step.op)
                 if (!op) return null
@@ -301,6 +363,7 @@ function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
                         {index + 1}
                       </span>
                       <span className="text-xs font-medium">{op.label}</span>
+                      <span className="text-[11px] text-[var(--chef-muted)]">— {op.how}</span>
                     </div>
                     {explanation && (
                       <>
@@ -317,7 +380,7 @@ function ListenStatsImpl({ stats, recipe, operations, bakeMs }: Props) {
                   </div>
                 )
               })}
-            </div>
+            </details>
           )}
         </div>
       )}

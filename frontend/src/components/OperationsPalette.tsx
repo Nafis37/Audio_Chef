@@ -1,13 +1,20 @@
 /**
  * Column 1 -- the Operations Palette.
  *
- * The 6 audio tools.  Each entry is a @hello-pangea/dnd Draggable living in a droppable
+ * The audio tools.  Each entry is a @hello-pangea/dnd Draggable living in a droppable
  * that never accepts drops (`isDropDisabled`), so the only thing you can do with a palette
  * item is drag it OUT, into the recipe column.  Clicking an item adds it too, which is
  * faster once you know the tools.
  *
- * There is no search box: six entries all fit on screen at once, so filtering them was
- * a control that cost more attention than it saved.
+ * There is no search box: every entry fits on screen at once, so filtering them was
+ * a control that cost more attention than it saved.  Instead the entries are grouped under
+ * their `category` heading and each carries its one-line `summary`, so "what does this
+ * do?" is answered before anything is dragged.  Ops marked `hidden` (kept only so old
+ * recipes still bake) are not offered.
+ *
+ * The headings sit INSIDE the droppable but are not Draggables, which dnd allows; the
+ * Draggable indexes still count 0..n-1 over the visible ops only, and renderClone looks
+ * the op up in that same list.
  *
  * Two things here are load-bearing and easy to undo by accident:
  *
@@ -28,7 +35,7 @@
 import { Draggable, Droppable } from '@hello-pangea/dnd'
 import type { DraggableProvided } from '@hello-pangea/dnd'
 import { GripVertical } from 'lucide-react'
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { iconFor } from '../icons'
 import type { OperationDef } from '../types'
 
@@ -73,11 +80,16 @@ function PaletteItem({ op, drag, isDragging, onAdd }: ItemProps) {
         <Icon className="size-4 shrink-0 text-[var(--chef-accent-strong)]" />
         <span className="text-sm font-medium">{op.label}</span>
       </div>
+      <p className="mt-1 pl-[1.625rem] text-[11px] leading-snug text-[var(--chef-muted)]">
+        {op.summary}
+      </p>
     </div>
   )
 }
 
 function OperationsPaletteImpl({ operations, onAdd }: Props) {
+  const visible = useMemo(() => operations.filter((op) => !op.hidden), [operations])
+
   return (
     <section className="flex h-full min-h-0 flex-col border-r border-[var(--chef-border)] bg-[var(--chef-panel)]">
       <header className="border-b border-[var(--chef-border)] px-4 py-3">
@@ -94,7 +106,7 @@ function OperationsPaletteImpl({ operations, onAdd }: Props) {
         isDropDisabled
         renderClone={(provided, snapshot, rubric) => (
           <PaletteItem
-            op={operations[rubric.source.index]}
+            op={visible[rubric.source.index]}
             drag={provided}
             isDragging={snapshot.isDragging}
             onAdd={onAdd}
@@ -109,17 +121,26 @@ function OperationsPaletteImpl({ operations, onAdd }: Props) {
                margin that also lands on provided.placeholder, which dnd measures. */
             className="min-h-0 flex-1 overflow-y-auto px-3 pb-4"
           >
-            {operations.map((op, index) => (
-              <Draggable key={op.id} draggableId={`palette-${op.id}`} index={index}>
-                {(drag, snapshot) => (
-                  <PaletteItem
-                    op={op}
-                    drag={drag}
-                    isDragging={snapshot.isDragging}
-                    onAdd={onAdd}
-                  />
+            {visible.map((op, index) => (
+              <div key={op.id}>
+                {/* The catalogue is already in category order, so a heading goes wherever
+                    the category changes. */}
+                {op.category !== visible[index - 1]?.category && (
+                  <h3 className="mb-1.5 mt-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--chef-muted)]">
+                    {op.category}
+                  </h3>
                 )}
-              </Draggable>
+                <Draggable draggableId={`palette-${op.id}`} index={index}>
+                  {(drag, snapshot) => (
+                    <PaletteItem
+                      op={op}
+                      drag={drag}
+                      isDragging={snapshot.isDragging}
+                      onAdd={onAdd}
+                    />
+                  )}
+                </Draggable>
+              </div>
             ))}
             {/* The placeholder is required by dnd even though this list never receives drops. */}
             {provided.placeholder}

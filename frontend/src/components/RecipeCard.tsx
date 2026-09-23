@@ -6,6 +6,18 @@
  * Each card also carries a Bypass toggle -- the step stays in the recipe but the backend
  * skips it, which is the quickest way to A/B an effect.
  *
+ * What a card shows, top to bottom -- all of it generated from the backend schema:
+ *
+ *   header       name, one-line summary, link / On-Off / remove
+ *   quick row    one-click settings ("Subtle", "Hall", "Fast talk"...) from `op.quick`
+ *   main knobs   the params a first-time user needs
+ *   Advanced     everything marked `advanced`, folded away
+ *   footer       "Listen for": what should change when you A/B it
+ *
+ * A param whose `show_when` does not match the step's current values (the robot's buzz
+ * while in chipmunk mode, say) is not rendered at all: a knob that does nothing is worse
+ * than none.
+ *
  * Continuous controls keep their own live value while you drag them.  A `range` input
  * fires an event per pixel of travel, and every one of those used to replace the whole
  * recipe array in App -- re-rendering both drag-and-drop columns at pointer rate.  Now
@@ -14,12 +26,18 @@
  */
 
 import type { DraggableProvided } from '@hello-pangea/dnd'
-import { GripVertical, Power, TriangleAlert, X } from 'lucide-react'
+import { ChevronRight, Ear, GripVertical, Info, TriangleAlert, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { iconFor } from '../icons'
-import { REGION_OPS } from '../regions'
+import { regionFor } from '../regions'
 import { useSources } from '../sources'
-import type { OperationDef, ParamDef, ParamValue, RecipeStep } from '../types'
+import {
+  isParamShown,
+  type OperationDef,
+  type ParamDef,
+  type ParamValue,
+  type RecipeStep,
+} from '../types'
 
 /** How often a dragged slider is allowed to push a value up into App's state. */
 const THROTTLE_MS = 80
@@ -36,6 +54,8 @@ interface Props {
   timesShifted: boolean
   onSelect: (uid: string) => void
   onParamChange: (uid: string, name: string, value: ParamValue) => void
+  /** Several params in one edit -- a quick-setting chip. */
+  onParamsChange: (uid: string, values: Record<string, ParamValue>) => void
   onToggleBypass: (uid: string) => void
   onRemove: (uid: string) => void
 }
@@ -97,6 +117,43 @@ function useLiveValue(
   return [local, set] as const
 }
 
+/** A readout in the param's own units: "+6.0 dB", "45%", "1.50×", "−7.0 st", "4.0 kHz". */
+function formatValue(param: ParamDef, value: number): string {
+  const signed = (text: string) =>
+    value > 0 ? `+${text}` : value < 0 ? `−${text.replace('-', '')}` : text
+  switch (param.unit) {
+    case '%':
+      return `${Math.round(value)}%`
+    case 'dB':
+      return `${signed(value.toFixed(1))} dB`
+    case 'st':
+      return `${signed(value.toFixed(1))} st`
+    case 'x':
+      return `${value.toFixed(2)}×`
+    case 'Hz':
+      return value >= 1000 ? `${(value / 1000).toFixed(1)} kHz` : `${Math.round(value)} Hz`
+    case 's':
+      return `${value.toFixed(2)} s`
+    case 'ms':
+      return `${value.toFixed(value < 10 ? 1 : 0)} ms`
+    default:
+      return `${Number(value.toFixed(2))}${param.unit}`
+  }
+}
+
+/** The label, with its plain-language help as a tooltip and a small hint that there is one. */
+function Label({ param }: { param: ParamDef }) {
+  return (
+    <span
+      title={param.help || undefined}
+      className="flex items-center gap-1 text-[var(--chef-muted)]"
+    >
+      {param.label}
+      {param.help && <Info className="size-3 opacity-50" aria-hidden />}
+    </span>
+  )
+}
+
 /**
  * The one control whose options come from the session rather than the backend schema.
  *
@@ -120,7 +177,7 @@ function SourceControl({
 
   return (
     <label className="flex items-center justify-between gap-3 py-1 text-xs">
-      <span className="text-[var(--chef-muted)]">{param.label}</span>
+      <Label param={param} />
       <select
         value={current}
         onChange={(event) => onChange(param.name, event.target.value)}
@@ -165,7 +222,7 @@ function Control({
   if (param.control === 'toggle') {
     return (
       <label className="flex items-center justify-between gap-3 py-1 text-xs">
-        <span className="text-[var(--chef-muted)]">{param.label}</span>
+        <Label param={param} />
         <input
           type="checkbox"
           checked={Boolean(live)}
@@ -177,17 +234,43 @@ function Control({
   }
 
   if (param.control === 'select') {
+    const options = param.options ?? []
+    const nameOf = (option: string) => param.option_labels?.[option] ?? option
+    // A handful of choices reads better as buttons you can see all at once.
+    if (options.length <= 4) {
+      return (
+        <div className="py-1 text-xs">
+          <Label param={param} />
+          <div className="mt-1 flex rounded-md border border-[var(--chef-border)] bg-[var(--chef-inset)] p-0.5">
+            {options.map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setLive(option)}
+                className={`flex-1 rounded px-1.5 py-1 text-[11px] transition ${
+                  String(live) === option
+                    ? 'bg-[var(--chef-accent-strong)] font-medium text-white'
+                    : 'text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
+                }`}
+              >
+                {nameOf(option)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )
+    }
     return (
       <label className="flex items-center justify-between gap-3 py-1 text-xs">
-        <span className="text-[var(--chef-muted)]">{param.label}</span>
+        <Label param={param} />
         <select
           value={String(live)}
           onChange={(event) => setLive(event.target.value)}
           className="rounded border border-[var(--chef-border)] bg-[var(--chef-inset)] px-2 py-1 text-xs text-[var(--chef-text)] outline-none focus:border-[var(--chef-accent-strong)]"
         >
-          {param.options?.map((option) => (
+          {options.map((option) => (
             <option key={option} value={option}>
-              {option}
+              {nameOf(option)}
             </option>
           ))}
         </select>
@@ -198,8 +281,11 @@ function Control({
   if (param.control === 'number') {
     return (
       <label className="flex items-center justify-between gap-3 py-1 text-xs">
-        <span className="text-[var(--chef-muted)]">
-          {param.label} {param.unit && <span className="opacity-60">({param.unit})</span>}
+        <span className="flex items-center gap-1">
+          <Label param={param} />
+          {param.unit && (
+            <span className="text-[var(--chef-muted)] opacity-60">({param.unit})</span>
+          )}
         </span>
         <input
           type="number"
@@ -218,10 +304,9 @@ function Control({
   return (
     <label className="block py-1 text-xs">
       <span className="flex items-center justify-between">
-        <span className="text-[var(--chef-muted)]">{param.label}</span>
+        <Label param={param} />
         <span className="font-mono text-[var(--chef-text)]">
-          {Number(live).toFixed(2)}
-          {param.unit && <span className="ml-0.5 opacity-60">{param.unit}</span>}
+          {formatValue(param, Number(live))}
         </span>
       </span>
       <input
@@ -247,12 +332,31 @@ function RecipeCardImpl({
   timesShifted,
   onSelect,
   onParamChange,
+  onParamsChange,
   onToggleBypass,
   onRemove,
 }: Props) {
   const Icon = iconFor(definition.icon)
-  // Only ops with time parameters can drive a region -- see src/regions.ts.
-  const linkable = definition.id in REGION_OPS
+
+  // Every param's current value, defaults filled in -- what show_when and the chips read.
+  const values: Record<string, ParamValue> = {}
+  for (const param of definition.params) values[param.name] = step.params[param.name] ?? param.default
+
+  // Only ops with time parameters can drive a region -- see src/regions.ts -- and only
+  // while the current mode uses one (the noise remover's "Automatically" does not).
+  const linkable = regionFor(definition.id, values) !== undefined
+
+  const shown = definition.params.filter((param) => isParamShown(param, values))
+  const main = shown.filter((param) => !param.advanced)
+  const advanced = shown.filter((param) => param.advanced)
+  const quick = Object.entries(definition.quick ?? {})
+  // A chip is lit when every value it sets is what the card currently holds.
+  const isQuickActive = (settings: Record<string, ParamValue>) =>
+    Object.entries(settings).every(([name, value]) =>
+      typeof value === 'number'
+        ? Math.abs(Number(values[name]) - value) < 1e-6
+        : values[name] === value,
+    )
 
   // One stable callback for the whole card instead of a fresh closure per parameter.
   const handleParam = useCallback(
@@ -285,8 +389,16 @@ function RecipeCardImpl({
           <GripVertical className="size-4" />
         </span>
         <span className="font-mono text-[10px] text-[var(--chef-muted)]">{index + 1}</span>
-        <Icon className="size-4 text-[var(--chef-accent-strong)]" />
-        <span className="flex-1 truncate text-sm font-medium">{definition.label}</span>
+        <Icon className="size-4 shrink-0 text-[var(--chef-accent-strong)]" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium">{definition.label}</span>
+          <span
+            className="block truncate text-[11px] text-[var(--chef-muted)]"
+            title={definition.summary}
+          >
+            {definition.summary}
+          </span>
+        </span>
 
         {linkable && (
           <span
@@ -305,20 +417,31 @@ function RecipeCardImpl({
           </span>
         )}
 
+        {/* stopPropagation: a click here must not also link the card via the header. */}
         <button
           type="button"
-          title={step.bypass ? 'Enable this step' : 'Bypass this step'}
-          onClick={() => onToggleBypass(step.uid)}
-          className={`rounded p-1 transition hover:bg-[var(--chef-hover)] ${
-            step.bypass ? 'text-[var(--chef-muted)]' : 'text-[var(--chef-accent-strong)]'
+          title={
+            step.bypass ? 'Switch this step back on' : 'Switch this step off to hear the difference'
+          }
+          onClick={(event) => {
+            event.stopPropagation()
+            onToggleBypass(step.uid)
+          }}
+          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider transition ${
+            step.bypass
+              ? 'border-[var(--chef-border)] text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
+              : 'border-[var(--chef-accent-strong)] bg-[var(--chef-accent-strong)] text-white'
           }`}
         >
-          <Power className="size-4" />
+          {step.bypass ? 'Off' : 'On'}
         </button>
         <button
           type="button"
           title="Remove from recipe"
-          onClick={() => onRemove(step.uid)}
+          onClick={(event) => {
+            event.stopPropagation()
+            onRemove(step.uid)
+          }}
           className="rounded p-1 text-[var(--chef-muted)] transition hover:bg-[var(--chef-hover)] hover:text-rose-600"
         >
           <X className="size-4" />
@@ -338,16 +461,64 @@ function RecipeCardImpl({
         </p>
       )}
 
+      {quick.length > 0 && (
+        <div className="flex flex-wrap gap-1 px-3 pt-2">
+          {quick.map(([name, settings]) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => onParamsChange(step.uid, settings)}
+              className={`rounded-full border px-2 py-0.5 text-[11px] transition ${
+                isQuickActive(settings)
+                  ? 'border-[var(--chef-accent-strong)] bg-[var(--chef-accent)]/40 text-[var(--chef-accent-strong)]'
+                  : 'border-[var(--chef-border)] text-[var(--chef-muted)] hover:border-[var(--chef-accent-strong)] hover:text-[var(--chef-text)]'
+              }`}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="space-y-0.5 px-3 py-2">
-        {definition.params.map((param) => (
+        {main.map((param) => (
           <Control
             key={param.name}
             param={param}
-            value={step.params[param.name] ?? param.default}
+            value={values[param.name]}
             onChange={handleParam}
           />
         ))}
+
+        {advanced.length > 0 && (
+          <details className="group pt-1">
+            <summary className="flex cursor-pointer list-none items-center gap-1 text-[11px] text-[var(--chef-muted)] hover:text-[var(--chef-text)]">
+              <ChevronRight className="size-3 transition group-open:rotate-90" />
+              Advanced ({advanced.length})
+            </summary>
+            <div className="mt-1 space-y-0.5 border-l border-[var(--chef-border)] pl-2">
+              {advanced.map((param) => (
+                <Control
+                  key={param.name}
+                  param={param}
+                  value={values[param.name]}
+                  onChange={handleParam}
+                />
+              ))}
+            </div>
+          </details>
+        )}
       </div>
+
+      {definition.listen_for && (
+        <p className="flex items-start gap-1.5 border-t border-[var(--chef-border)] px-3 py-1.5 text-[11px] leading-snug text-[var(--chef-muted)]">
+          <Ear className="mt-px size-3 shrink-0 text-[var(--chef-accent-strong)]" />
+          <span>
+            <span className="font-medium text-[var(--chef-text)]">Listen for: </span>
+            {definition.listen_for}
+          </span>
+        </p>
+      )}
     </div>
   )
 }

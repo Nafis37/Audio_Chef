@@ -1,13 +1,70 @@
 """
 Audio Speed and Pitch Lab -- phase vocoder time stretch + manual resampling
 ==========================================================================
+In plain words
+--------------
+Speed makes the clip shorter or longer.  With "Keep pitch" on, the voice stays at its own
+pitch (like a podcast app's 1.5x button); with it off, the clip is played like a sped-up
+tape and the pitch rises with the speed.  Pitch moves every note up or down by a number of
+semitones (12 = one octave) without changing the length.
+
+Speed and pitch are coupled on tape: play it faster and it also sounds higher.  Two
+building blocks decouple them.  (scipy.signal.resample is banned; both are hand-made.)
+
+1. Resampling by linear interpolation -- the tape effect
+--------------------------------------------------------
+Read the input at fractional positions  p_m = m * s  (s = speed, input samples per output
+sample) and interpolate between neighbours:
+
+        y[m] = (1 - frac) x[i] + frac x[i+1],     i = floor(p_m), frac = p_m - i
+
+(np.interp does exactly this.)  Output length is N / s, and every frequency f becomes
+s * f: duration and pitch move together.  Linear interpolation is a crude low-pass
+(sinc^2 response), so speeding up far enough aliases a little -- audible only on bright
+material at s > 2.
+
+2. Phase-vocoder time stretch -- duration without pitch
+-------------------------------------------------------
+Analyse with hop H_a, resynthesise with hop H_s = rate * H_a.  Frames placed further
+apart make the sound longer; the problem is the phase, which must advance by
+omega * H_s (not omega * H_a) between output frames or neighbouring frames cancel.
+
+  (a) Expected phase advance of bin k over one analysis hop:
+        dphi_exp[k] = 2 pi k H_a / N
+  (b) Measured advance, and its deviation wrapped into (-pi, pi] (princarg, stft.py):
+        dev[t,k] = princarg( phi[t,k] - phi[t-1,k] - dphi_exp[k] )
+  (c) True instantaneous frequency (rad/sample):
+        omega[t,k] = (dphi_exp[k] + dev[t,k]) / H_a
+  (d) Accumulate synthesis phase over the NEW hop:
+        psi[t,k] = psi[t-1,k] + omega[t,k] * H_s,      psi[0] = phi[0]
+  (e) Y[t,k] = |X[t,k]| e^{j psi[t,k]}  ->  istft with hop H_s.
+
+  Steps (b)-(d) run only for the spectral PEAKS of each frame; every other bin is locked to
+  its peak (identity phase locking, derived in stft.py).  Without it the bins of each
+  partial drift apart and partly cancel: the stretch sounds metallic and comes out a few
+  dB quieter than the input.
+
+Magnitudes are untouched, so every partial keeps its frequency; only its duration scales
+by H_s / H_a.
+
+3. Pitch shift with constant duration = 2 then 1
+------------------------------------------------
+For a ratio  r = 2^(semitones / 12):
+
+        stretch by r   (longer, same pitch)      ->  N * r samples
+        resample by r  (shorter, r x higher)     ->  N samples, pitch * r
+
+The recipe wrapper: `speed` with preserve_pitch uses (2) with rate = 1/speed; without it,
+(1) -- the tape.  `semitones` is then applied with (3).
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .stft import DEFAULT_HOP, DEFAULT_N_FFT, istft, principal_argument, stft
+from .stft import (
+    DEFAULT_HOP, DEFAULT_N_FFT, istft, peak_regions, principal_argument, spectral_peaks, stft,
+)
 
 
 def resample(x: np.ndarray, speed: float) -> np.ndarray:
@@ -52,7 +109,6 @@ def time_stretch(
 
     out_phase = np.zeros((n_frames, n_bins))
     out_phase[0] = phi[0]                          # first frame keeps its original phase
-    running = phi[0].copy()
 
     for t in range(1, n_frames):
         dphi_measured = phi[t] - phi[t - 1]
@@ -60,8 +116,16 @@ def time_stretch(
         # that recovers the true frequency instead of an aliased multiple of it.
         dphi_dev = principal_argument(dphi_measured - dphi_expected)
         omega = (dphi_expected + dphi_dev) / hop_a      # true frequency, rad/sample
-        running = running + omega * hop_s               # advance over the NEW hop
-        out_phase[t] = running
+        advanced = out_phase[t - 1] + omega * hop_s     # (d): advance over the NEW hop
+
+        peaks = spectral_peaks(mag[t])
+        if peaks.size == 0:                             # silent frame: nothing to lock to
+            out_phase[t] = advanced
+            continue
+        # Identity phase locking: only the peaks keep the advanced phase; each other bin
+        # takes its peak's new phase plus the offset it had from that peak in the input.
+        owner = peaks[peak_regions(n_bins, peaks)]
+        out_phase[t] = advanced[owner] + (phi[t] - phi[t, owner])
 
     out_spec = mag * np.exp(1j * out_phase)
     return istft(out_spec, hop=hop_s, n_fft=n_fft)

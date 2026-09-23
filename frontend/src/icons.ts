@@ -10,6 +10,7 @@ import {
   Layers,
   Mic,
   Minimize2,
+  Repeat,
   Scissors,
   SlidersHorizontal,
   Wand2,
@@ -26,6 +27,7 @@ const ICONS: Record<string, LucideIcon> = {
   Minimize2,
   Mic,
   Layers,
+  Repeat,
 }
 
 /** Falls back to a generic wand for any icon name we do not know about yet. */

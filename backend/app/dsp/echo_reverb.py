@@ -1,5 +1,78 @@
 """
 Echo and Reverb Studio -- impulse response convolution
+======================================================
+In plain words
+--------------
+Echo: distinct copies of the sound come back after a fixed delay, each one quieter than
+the last -- shouting across a canyon.  Delay is the gap between copies, Repeats how much
+of each copy survives into the next.
+
+Reverb: thousands of reflections arrive so close together that they blur into one smooth
+tail -- singing in a hall.  Room size moves the first reflections further apart, Tail
+length is how long the room keeps ringing (RT60), and Wet is how much room you hear
+against the original.
+
+Both effects are LTI systems, so each is completely described by its impulse response h
+and applied as one convolution  y = x * h.
+
+Echo -- the feedback delay as an IR
+-----------------------------------
+The textbook echo is the feedback comb filter
+
+        y[n] = x[n] + g * y[n - D],        D = round(delay * fs),  0 <= g < 1
+
+Unrolling the recursion (substitute y[n - D] into itself):
+
+        y[n] = x[n] + g x[n-D] + g^2 x[n-2D] + ...    =   sum_k g^k x[n - kD]
+
+which is a convolution with the sparse impulse response
+
+        h[kD] = g^k,     h = 0 elsewhere        (H(z) = 1 / (1 - g z^-D))
+
+The IR is truncated once the taps have decayed _TAIL_DB below the first:
+
+        g^k < 10^(-_TAIL_DB/20)    ->    k > ln(10^(-_TAIL_DB/20)) / ln(g)
+
+At 240 dB that is far below float64 round-off relative to the signal, so the convolution
+is not an approximation of the recursion but equal to it (tests/test_dsp.py checks this
+against a per-sample loop).  g is capped at 0.95: at g = 1 the taps never decay.
+
+Reverb -- a synthesised room
+----------------------------
+A room's IR has three parts, all built in _room_ir():
+
+  1. Pre-delay: silence until the first wall reflection returns (_PREDELAY_MS * scale).
+  2. Early reflections: a handful of discrete taps at mutually prime delays (so they never
+     line up into a pitched flutter), the nth one attenuated _EARLY_GAIN^n.  Their
+     spacing is what the ear reads as room SIZE, so room_size scales them.
+  3. The diffuse tail: Gaussian noise under an exponential envelope.  RT60 is by
+     definition the time to fall 60 dB, i.e. amplitude x 10^-3:
+
+        env[n] = 10^(-3 n / (RT60 * fs))              (env = 10^-3 at n = RT60*fs)
+
+     The tail fades in over _BUILDUP_MS rather than starting on a step.
+
+Absorption: real surfaces eat highs faster than lows.  A static linear tilt on the IR's
+spectrum,  |H(f)| *= 1 - _HF_DAMPING * f / f_Nyquist,  approximates it.
+
+Energy normalisation: the IR is scaled so  sum h^2 = 1.  For a white input the output
+power then equals the input power (Parseval), so decay and room size change the
+CHARACTER of the tail but not its loudness.  The noise is drawn from a fixed seed so
+every bake of the same settings is identical.
+
+Linear vs circular convolution
+------------------------------
+Multiplying two length-L FFTs computes a CIRCULAR convolution: the tail past L wraps
+around onto the start.  Zero-padding both to  L >= len(x) + len(h) - 1  makes the
+circular result equal to the linear one; _fft_convolve rounds that up to a power of two
+and then cuts the output back to len(x) (effects preserve length).
+
+Dry / wet
+---------
+        y = (1 - m) x + m (x * h)
+
+For the echo, h[0] = 1 already carries the dry signal, so mix fades in the repeats; the
+room IR has no dry tap, so mix = 1 is fully wet.
 """
 
 from __future__ import annotations

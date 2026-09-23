@@ -26,14 +26,46 @@ export interface ParamDef {
   max?: number
   step?: number
   options?: string[] | null
+  /** Human names for enum values ("trim" -> "Keep the selection"). */
+  option_labels?: Record<string, string>
+  /** One plain sentence: the control's tooltip. */
+  help?: string
+  /** Tucked into the card's "Advanced" section. */
+  advanced?: boolean
+  /** Only shown while another param holds one of these values: {"mode": ["reverb"]}. */
+  show_when?: Record<string, string[]> | null
+  /**
+   * The value shown and sent is in display units (e.g. 0..100 %); the backend multiplies
+   * by this before the DSP sees it.  Informational here -- the UI never converts.
+   */
+  scale?: number | null
 }
 
 export interface OperationDef {
   id: string
   label: string
   icon: string
-  description: string
+  /** Palette group heading. */
+  category: string
+  /** What it does, in one plain sentence. */
+  summary: string
+  /** The technique, in one line -- shown beside the maths. */
+  how: string
+  /** What a listener should hear and see change. */
+  listen_for: string
+  /** One-click settings: name -> the params it moves (display units). */
+  quick?: Record<string, Record<string, ParamValue>>
+  /** Served so old recipes still render, but not offered in the palette. */
+  hidden?: boolean
   params: ParamDef[]
+}
+
+/** Is this param relevant given the step's current values?  (See ParamDef.show_when.) */
+export function isParamShown(param: ParamDef, params: Record<string, ParamValue>): boolean {
+  if (!param.show_when) return true
+  return Object.entries(param.show_when).every(([other, values]) =>
+    values.includes(String(params[other])),
+  )
 }
 
 /** One card in the recipe column.  `uid` keeps React keys stable when the same
@@ -144,9 +176,12 @@ export interface BakeStats {
   resampled: string[]
   /** Only the sources the walk actually reached; an unreferenced source is absent. */
   sources: SourceReport[]
-  /** max |y| BEFORE run_recipe clamps to +-1 -- >1 means the output was clipped. */
+  /** max |y| BEFORE the final fit to full scale -- >1 means it had to be turned down. */
   pre_clip_peak: number
+  /** How many samples WOULD have gone past full scale. */
   clipped: number
+  /** <= 0: how far the whole output was turned down to fit instead of clipping. */
+  normalised_db?: number
   steps_applied: number
   steps_bypassed: number
   /** A step emptied the buffer and the fold stopped early. */
@@ -156,8 +191,19 @@ export interface BakeStats {
 /** Result of a bake: the rendered audio plus what the backend reported about it. */
 export interface BakeResult {
   url: string
+  /** Handle for GET /spectrogram/bake/{id}; null from a backend that does not send it. */
+  bakeId: string | null
   bakeMs: number
   duration: number
   /** null if the backend did not send (or CORS hid) the X-Bake-Stats header. */
   stats: BakeStats | null
+}
+
+/** A spectrogram as served by GET /spectrogram/...: uint8 grid, row 0 = highest frequency. */
+export interface SpectrogramData {
+  rows: number
+  cols: number
+  fMin: number
+  fMax: number
+  pixels: Uint8Array
 }

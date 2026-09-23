@@ -9,13 +9,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import config
-from .routers import process, upload
+from .routers import process, spectrogram, upload
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Make sure the scratch directory exists before the first upload arrives.
-    # starts before app, yeilds during the app, does after yeild part after the app stops
     config.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     yield
 
@@ -31,11 +30,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     # Custom response headers are hidden from JS unless they are explicitly exposed.
-    expose_headers=["X-Bake-Ms", "X-Output-Duration", "X-Bake-Stats"],
+    expose_headers=[
+        "X-Bake-Ms", "X-Output-Duration", "X-Bake-Stats", "X-Bake-Id",
+        "X-Spec-Rows", "X-Spec-Cols", "X-Spec-Fmin", "X-Spec-Fmax",
+    ],
 )
 
 app.include_router(upload.router)
 app.include_router(process.router)
+app.include_router(spectrogram.router)
 
 
 @app.get("/health")

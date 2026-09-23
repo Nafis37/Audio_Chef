@@ -19,14 +19,21 @@
  *   3. every bake POSTs the whole project to /process and gets a rendered WAV back
  *
  * With Auto-Bake on, step 3 fires (debounced) whenever any chain or parameter changes.
+ *
+ * Seeing and hearing the difference:
+ *   - each panel shows a spectrogram under its waveform, drawn by the backend from our own
+ *     STFT -- GET /spectrogram/file/{file_id} for the input, /spectrogram/bake/{bake_id}
+ *     for each fresh output
+ *   - the A/B switch above the panels (or the B key) hands playback between Original and
+ *     Processed at the same point in the clip, so a change is heard, not remembered
  * A project where EVERY chain is empty never bakes: there is nothing to hear that the
  * Input panel is not already showing.
  */
 
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd'
-import { ChefHat, Upload } from 'lucide-react'
+import { ChefHat, Pause, Play, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchOperations, processGraph, toWire, uploadFile } from './api'
+import { fetchOperations, fetchSpectrogram, processGraph, toWire, uploadFile } from './api'
 import { ColumnSplitter } from './components/ColumnSplitter'
 import { ListenStats } from './components/ListenStats'
 import { OperationsPalette } from './components/OperationsPalette'
@@ -34,8 +41,9 @@ import { Recipe, type ChainTab } from './components/Recipe'
 import { Recorder } from './components/Recorder'
 import { SourcesRail } from './components/SourcesRail'
 import { Toolbar } from './components/Toolbar'
-import { WaveformViewer, type RegionSpec } from './components/WaveformViewer'
-import { REGION_OPS } from './regions'
+import { WaveformViewer, type RegionSpec, type WaveformHandle } from './components/WaveformViewer'
+import type { Preset } from './presets'
+import { regionFor } from './regions'
 import { SourcesProvider, type SourceOption } from './sources'
 import {
   MASTER,
@@ -45,6 +53,7 @@ import {
   type ParamValue,
   type RecipeStep,
   type Source,
+  type SpectrogramData,
 } from './types'
 
 /** A bake faster than this never shows the "baking…" overlay -- it would only flicker. */
@@ -127,6 +136,17 @@ export default function App() {
   const [outputId, setOutputId] = useState<string | null>(null)
 
   const [output, setOutput] = useState<BakeResult | null>(null)
+
+  // Spectrograms: one per loaded source (its raw file), and one for the latest bake.
+  const [inputSpectrograms, setInputSpectrograms] = useState<Map<string, SpectrogramData>>(
+    () => new Map(),
+  )
+  const [outputSpectrogram, setOutputSpectrogram] = useState<SpectrogramData | null>(null)
+
+  // A/B: which panel you are listening to, and handles to drive both.
+  const [hearing, setHearing] = useState<'input' | 'output'>('input')
+  const inputView = useRef<WaveformHandle>(null)
+  const outputView = useRef<WaveformHandle>(null)
 
   // Column widths.  Lazily initialised so localStorage is touched once, not per render.
   const [paletteWidth, setPaletteWidth] = useState(() =>
@@ -217,6 +237,11 @@ export default function App() {
       setOutputId((current) => current ?? id)
       setEditing((current) => (current === MASTER && sources.length === 0 ? id : current))
 
+      // The input spectrogram is a nicety: if it fails the waveform is still there.
+      fetchSpectrogram('file', info.file_id)
+        .then((data) => setInputSpectrograms((current) => new Map(current).set(id, data)))
+        .catch(() => {})
+
       setStatus('Ready — add an operation to the recipe')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed')
@@ -241,6 +266,11 @@ export default function App() {
       const fallback = remaining[0]?.id ?? null
 
       setSources(remaining)
+      setInputSpectrograms((current) => {
+        const next = new Map(current)
+        next.delete(id)
+        return next
+      })
       // Both pointers have to land somewhere real.  An assemble card still naming the
       // removed id keeps it on purpose: the card shows "(removed)" and the backend
       // refuses the bake with a readable message, which beats silently repointing it at
@@ -349,6 +379,74 @@ export default function App() {
     }
   }, [sources, master, editing, outputId, editingSource, clearOutput])
 
+  // --- The output spectrogram follows each bake ------------------------------------
+  const bakeId = output?.bakeId ?? null
+  useEffect(() => {
+    // No bake, no picture: the Output panel is handed null while `output` is null.
+    if (!bakeId) return
+    // A newer bake supersedes this fetch; keep showing the previous picture meanwhile,
+    // which reads as "updating" rather than flashing empty after every slider move.
+    const controller = new AbortController()
+    fetchSpectrogram('bake', bakeId, controller.signal)
+      .then(setOutputSpectrogram)
+      .catch(() => {})
+    return () => controller.abort()
+  }, [bakeId])
+
+  // --- A/B: hand playback from one panel to the other at the same point ------------
+  const listenTo = useCallback((side: 'input' | 'output') => {
+    const from = (side === 'input' ? outputView : inputView).current
+    const to = (side === 'input' ? inputView : outputView).current
+    setHearing(side)
+    if (!from || !to) return
+    const wasPlaying = from.isPlaying() || to.isPlaying()
+    // Proportional, not absolute: after a speed change the same moment of the clip sits
+    // at a different number of seconds in the two files.
+    const fromDuration = from.getDuration()
+    const fraction = fromDuration > 0 ? from.getCurrentTime() / fromDuration : 0
+    from.pause()
+    if (!to.isPlaying()) to.setTime(Math.min(fraction * to.getDuration(), to.getDuration()))
+    if (wasPlaying) to.play()
+  }, [])
+
+  const toggleListening = useCallback(() => {
+    const side = hearing === 'input' ? 'output' : 'input'
+    if (side === 'output' && !output) return
+    listenTo(side)
+  }, [hearing, output, listenTo])
+
+  const playPauseCurrent = useCallback(() => {
+    const view = (hearing === 'input' ? inputView : outputView).current
+    if (!view) return
+    if (view.isPlaying()) view.pause()
+    else view.play()
+  }, [hearing])
+
+  // The B key flips A/B -- the quickest way to hear what a step does during a demo.
+  // Ignored while typing in a control, where "b" is just a letter.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'b' && event.key !== 'B') return
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      const target = event.target as HTMLElement | null
+      if (target?.closest('input, select, textarea, [contenteditable="true"]')) return
+      event.preventDefault()
+      toggleListening()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [toggleListening])
+
+  // Pressing play on one panel silences the other, so you only ever hear one.
+  const onInputPlay = useCallback(() => {
+    outputView.current?.pause()
+    setHearing('input')
+  }, [])
+  const onOutputPlay = useCallback(() => {
+    inputView.current?.pause()
+    setHearing('output')
+  }, [])
+
   // --- Auto-Bake: debounce so dragging a slider does not fire a request per pixel ----
   useEffect(() => {
     if (!autoBake) return
@@ -394,7 +492,7 @@ export default function App() {
       })
       // Adding an op with time parameters links it straight away, so its region is on the
       // waveform without a second click.
-      if (op.id in REGION_OPS) setActiveUid(chain, step.uid)
+      if (regionFor(op.id, step.params)) setActiveUid(chain, step.uid)
     },
     [editing, editChain, setActiveUid],
   )
@@ -405,6 +503,25 @@ export default function App() {
     editChain(editing, () => [])
     setActiveUid(editing, null)
   }, [editing, editChain, setActiveUid])
+
+  // A preset REPLACES the open chain.  Each step starts as newStep() -- every param at its
+  // schema default -- and the preset only overrides the ones it names, so a preset can
+  // never hold a stale schema.  An op the catalogue does not have is skipped.
+  const applyPreset = useCallback(
+    (preset: Preset) => {
+      const byId = new Map(operations.map((op) => [op.id, op]))
+      const steps = preset.steps.flatMap(({ op: id, params }) => {
+        const op = byId.get(id)
+        if (!op) return []
+        const step = newStep(op)
+        return [{ ...step, params: { ...step.params, ...params } }]
+      })
+      editChain(editing, () => steps)
+      // Same rule as addOperation: a step with a region is linked straight away.
+      setActiveUid(editing, steps.find((step) => regionFor(step.op, step.params))?.uid ?? null)
+    },
+    [operations, editing, editChain, setActiveUid],
+  )
 
   const toggleAutoBake = useCallback(() => setAutoBake((value) => !value), [])
 
@@ -485,7 +602,8 @@ export default function App() {
 
   // --- The waveform region, and the card it is bound to ------------------------------
   const activeStep = recipe.find((step) => step.uid === activeUid) ?? null
-  const binding = activeStep ? REGION_OPS[activeStep.op] : undefined
+  // regionFor() also asks whether the step's current mode uses a region at all.
+  const binding = activeStep ? regionFor(activeStep.op, activeStep.params) : undefined
   // Master has no raw input of its own, so its regions are measured against the length
   // of the last bake -- the only clock that chain has.
   const regionDuration =
@@ -700,9 +818,11 @@ export default function App() {
               onSelectTab={setEditing}
               onSelect={selectStep}
               onParamChange={updateParam}
+              onParamsChange={updateParams}
               onToggleBypass={toggleBypass}
               onRemove={removeStep}
               onClear={handleClear}
+              onPreset={applyPreset}
             />
           </SourcesProvider>
 
@@ -729,6 +849,40 @@ export default function App() {
 
             {sources.length > 0 ? (
               <div className="space-y-4 p-4">
+                {/* A/B: one transport for both panels.  Picking a side mid-playback carries
+                    on from the same point in the other file. */}
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--chef-border)] bg-[var(--chef-panel)] px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={playPauseCurrent}
+                    className="rounded-full border border-[var(--chef-border)] p-1.5 transition hover:border-[var(--chef-accent-strong)]"
+                    title="Play / pause what you are listening to"
+                  >
+                    <PlayPauseIcon viewRef={hearing === 'input' ? inputView : outputView} />
+                  </button>
+                  <span className="text-xs text-[var(--chef-muted)]">Listening to</span>
+                  <div className="flex rounded-md border border-[var(--chef-border)] bg-[var(--chef-inset)] p-0.5">
+                    {(['input', 'output'] as const).map((side) => (
+                      <button
+                        key={side}
+                        type="button"
+                        disabled={side === 'output' && !output}
+                        onClick={() => listenTo(side)}
+                        className={`rounded px-3 py-1 text-xs transition disabled:opacity-30 ${
+                          hearing === side
+                            ? 'bg-[var(--chef-accent-strong)] font-medium text-white'
+                            : 'text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
+                        }`}
+                      >
+                        {side === 'input' ? 'A · Original' : 'B · Processed'}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="ml-auto text-[11px] text-[var(--chef-muted)]">
+                    press <kbd className="rounded border border-[var(--chef-border)] px-1 font-mono">B</kbd> to flip
+                  </span>
+                </div>
+
                 {/* On the MASTER tab there is no raw input of its own, so this falls back
                     to the output source's file and says which one it is drawing -- the
                     pre-master assembled mix would cost a second round trip per bake. */}
@@ -743,6 +897,12 @@ export default function App() {
                   emptyHint=""
                   region={region}
                   onRegionChange={onRegionChange}
+                  ref={inputView}
+                  spectrogram={
+                    inputSpectrograms.get((editing === MASTER ? outputId : editing) ?? '') ?? null
+                  }
+                  highlighted={hearing === 'input'}
+                  onPlay={onInputPlay}
                 >
                   {binding && (
                     <span className="text-[11px] text-[var(--chef-muted)]">
@@ -755,6 +915,10 @@ export default function App() {
                   url={output?.url ?? null}
                   accent="#15803d"
                   busy={showBusy}
+                  ref={outputView}
+                  spectrogram={output ? outputSpectrogram : null}
+                  highlighted={hearing === 'output'}
+                  onPlay={onOutputPlay}
                   emptyHint={
                     hasAnySteps
                       ? 'Baking…'
@@ -821,4 +985,17 @@ export default function App() {
       </DragDropContext>
     </div>
   )
+}
+
+/**
+ * The A/B bar's play icon.  wavesurfer owns the playing state, so this polls the handle a
+ * few times a second rather than threading play/pause events up through App's state.
+ */
+function PlayPauseIcon({ viewRef }: { viewRef: React.RefObject<WaveformHandle | null> }) {
+  const [playing, setPlaying] = useState(false)
+  useEffect(() => {
+    const timer = setInterval(() => setPlaying(viewRef.current?.isPlaying() ?? false), 200)
+    return () => clearInterval(timer)
+  }, [viewRef])
+  return playing ? <Pause className="size-4" /> : <Play className="size-4" />
 }

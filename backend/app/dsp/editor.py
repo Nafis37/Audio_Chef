@@ -1,6 +1,9 @@
 """
 Mini Audio Editor -- trim and splice
 ====================================
+In plain words: keep only the part between two times (trim), or cut that part out and
+join the two sides (splice).  Drag the green region on the Input waveform to choose it.
+
 Pure time-domain array operation: numpy slicing and concatenation, nothing more.
 
     trim(start, end)   -> keep   x[start_sample : end_sample]

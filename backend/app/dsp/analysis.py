@@ -1,5 +1,22 @@
 """
 Signal measurements -- the numbers shown next to the two waveforms
+==================================================================
+measure() runs on the input and on the output of every bake; ListenStats shows the two
+side by side so each effect's influence is a number, not just a picture.
+
+For a buffer x[0 .. N-1] at sample rate fs:
+
+        peak      = max |x[n]|
+        RMS       = sqrt( (1/N) sum x[n]^2 )             (a sine of amplitude A: A / sqrt 2)
+        dBFS(v)   = 20 log10(v)                          (0 dB = full scale, floored -120)
+        crest     = peak_dB - RMS_dB = 20 log10(peak / RMS)
+                    (sine: 3.01 dB; a compressor pushes it down, a transient pushes it up)
+        DC        = (1/N) sum x[n]                       (the 0 Hz component)
+        ZCR       = #{ n : sign x[n] != sign x[n-1] } * fs / N
+                    (sign changes per second; a pure tone of f Hz gives 2f)
+        centroid  = sum_k f_k |X[k]|  /  sum_k |X[k]|    (X = rfft of the whole buffer)
+                    ("centre of mass" of the spectrum -- where the brightness sits;
+                    an EQ boost at f0 pulls it toward f0)
 """
 
 from __future__ import annotations

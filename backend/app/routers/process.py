@@ -7,6 +7,10 @@ walk lives in dsp/graph.py and this module is only the HTTP shell around it.
 
 GET /operations exposes the same catalogue the DSP engine validates against, so the
 palette in the browser is generated from the backend's own schema.
+
+Every bake is also remembered for a short while under a `bake_id` (X-Bake-Id header), so
+the spectrogram router can draw the exact buffer that was just rendered without the
+browser sending the recipe again.
 """
 
 from __future__ import annotations
@@ -14,7 +18,11 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any
+import uuid
+from collections import OrderedDict
+from typing import Any, Optional
+
+import numpy as np
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -28,6 +36,24 @@ router = APIRouter()
 # Source ids are minted by the browser and echoed back inside error messages, so they are
 # held to something narrow rather than trusted.
 _SOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+# The last few rendered buffers, by bake_id.  A handful is plenty: the browser only ever
+# asks for the spectrogram of the bake it has just received.
+_BAKE_LIMIT = 4
+_bakes: "OrderedDict[str, tuple[np.ndarray, int]]" = OrderedDict()
+
+
+def remember_bake(buffer: np.ndarray, fs: int) -> str:
+    """Keep a rendered buffer for the spectrogram router; returns its id."""
+    bake_id = uuid.uuid4().hex
+    _bakes[bake_id] = (buffer, fs)
+    while len(_bakes) > _BAKE_LIMIT:
+        _bakes.popitem(last=False)          # evict the oldest
+    return bake_id
+
+
+def recall_bake(bake_id: str) -> tuple[np.ndarray, int] | None:
+    return _bakes.get(bake_id)
 
 
 class RecipeStep(BaseModel):
@@ -57,7 +83,7 @@ class ProcessRequest(BaseModel):
     output_source: str
     apply_master: bool = True
     # Overrides the automatic choice (the highest rate among the sources).
-    sample_rate: int | None = None
+    sample_rate: Optional[int] = None
 
 
 @router.get("/operations")
@@ -144,6 +170,7 @@ def process(request: ProcessRequest) -> Response:
     }
 
     wav_bytes = write_wav_bytes(processed, project_fs)
+    bake_id = remember_bake(processed, project_fs)
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
@@ -154,6 +181,8 @@ def process(request: ProcessRequest) -> Response:
             # Input/output measurements plus what the walk did, as one compact JSON
             # header, so a bake stays a single round trip.
             "X-Bake-Stats": json.dumps(stats, separators=(",", ":")),
+            # GET /spectrogram/bake/{id} draws this exact buffer.
+            "X-Bake-Id": bake_id,
             # No Content-Disposition: the browser fetches this, turns it into a blob URL
             # and plays it inline.  Marking it `attachment` made the browser offer to save
             # the file on every bake, which is not what a live preview should do.

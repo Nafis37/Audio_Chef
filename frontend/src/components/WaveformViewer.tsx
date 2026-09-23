@@ -17,13 +17,36 @@
  *               numbers pure guesswork.
  *   regions  -- the draggable span on the Input, bound to the linked card's two time
  *               parameters.  See src/regions.ts for which operations have one.
+ *
+ * TRUE amplitude, not normalised.  wavesurfer's `normalize` scales every drawing to fill
+ * its box, which made the Input and Output look the same height whatever the recipe did
+ * to the level: an EQ boost, a compressor or a denoise were invisible.  Both panels now
+ * draw on the same absolute scale (full height = full scale), so "louder" looks taller.
+ *
+ * Under the waveform sits the spectrogram (Spectrogram.tsx) -- the view in which EQ, noise
+ * removal and the voice effects are actually visible.
+ *
+ * The parent gets an imperative handle (play / pause / seek) so the A/B switch in App can
+ * hand playback from one viewer to the other at the same moment.
  */
 
 import { Pause, Play } from 'lucide-react'
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin, { type Region } from 'wavesurfer.js/dist/plugins/regions.esm.js'
 import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js'
+import type { SpectrogramData } from '../types'
+import { Spectrogram } from './Spectrogram'
+
+/** What App can do to a viewer from outside -- enough for an A/B switch. */
+export interface WaveformHandle {
+  play: () => void
+  pause: () => void
+  isPlaying: () => boolean
+  getCurrentTime: () => number
+  getDuration: () => number
+  setTime: (seconds: number) => void
+}
 
 /** The span to draw, in seconds.  Null means this viewer shows no region at all. */
 export interface RegionSpec {
@@ -40,7 +63,14 @@ interface Props {
   busy?: boolean
   region?: RegionSpec | null
   onRegionChange?: (start: number, end: number) => void
+  /** The hand-made spectrogram of the same audio; null while it is loading. */
+  spectrogram?: SpectrogramData | null
+  /** Highlights the panel -- used by the A/B switch to show which one you are hearing. */
+  highlighted?: boolean
+  /** Fires when this viewer starts playing, so the parent can pause the other one. */
+  onPlay?: () => void
   children?: React.ReactNode
+  ref?: Ref<WaveformHandle>
 }
 
 /** Matches RecipeCard's slider throttle: a drag reports at most this often. */
@@ -57,7 +87,11 @@ function WaveformViewerImpl({
   busy,
   region,
   onRegionChange,
+  spectrogram = null,
+  highlighted = false,
+  onPlay,
   children,
+  ref,
 }: Props) {
   const container = useRef<HTMLDivElement>(null)
   const wavesurfer = useRef<WaveSurfer | null>(null)
@@ -72,6 +106,21 @@ function WaveformViewerImpl({
   // The callback is read through a ref so the subscription below can be made once.
   const notify = useRef(onRegionChange)
   notify.current = onRegionChange
+  const notifyPlay = useRef(onPlay)
+  notifyPlay.current = onPlay
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      play: () => void wavesurfer.current?.play(),
+      pause: () => wavesurfer.current?.pause(),
+      isPlaying: () => wavesurfer.current?.isPlaying() ?? false,
+      getCurrentTime: () => wavesurfer.current?.getCurrentTime() ?? 0,
+      getDuration: () => wavesurfer.current?.getDuration() ?? 0,
+      setTime: (seconds: number) => wavesurfer.current?.setTime(seconds),
+    }),
+    [],
+  )
 
   const [playing, setPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
@@ -98,7 +147,7 @@ function WaveformViewerImpl({
       barWidth: 2,
       barGap: 1,
       barRadius: 2,
-      normalize: true,
+      normalize: false,         // true amplitude: see the header comment
       plugins: [
         regionsPlugin,
         TimelinePlugin.create({
@@ -109,7 +158,10 @@ function WaveformViewerImpl({
     })
     wavesurfer.current = instance
 
-    instance.on('play', () => setPlaying(true))
+    instance.on('play', () => {
+      setPlaying(true)
+      notifyPlay.current?.()
+    })
     instance.on('pause', () => setPlaying(false))
     instance.on('finish', () => setPlaying(false))
     instance.on('ready', () => {
@@ -219,7 +271,13 @@ function WaveformViewerImpl({
   }, [region, ready])
 
   return (
-    <section className="rounded-lg border border-[var(--chef-border)] bg-[var(--chef-panel)]">
+    <section
+      className={`rounded-lg border bg-[var(--chef-panel)] transition ${
+        highlighted
+          ? 'border-[var(--chef-accent-strong)] ring-2 ring-[var(--chef-accent)]/60'
+          : 'border-[var(--chef-border)]'
+      }`}
+    >
       <header className="flex items-center gap-3 border-b border-[var(--chef-border)] px-4 py-2.5">
         <button
           type="button"
@@ -241,29 +299,34 @@ function WaveformViewerImpl({
         <div className="ml-auto flex items-center gap-2">{children}</div>
       </header>
 
-      <div className="relative px-4 pb-3 pt-4">
-        {/* The container is always mounted and always laid out at full width -- the
-            instance lives in it across bakes, and hiding it would hand wavesurfer a
-            zero-width canvas to draw the next waveform into. */}
-        <div className="min-h-24">
-          <div ref={container} />
-        </div>
-        {!url && (
-          <p className="absolute inset-0 flex items-center justify-center text-center text-xs text-[var(--chef-muted)]">
-            {emptyHint}
-          </p>
-        )}
-        {undecodable && (
-          <p className="absolute inset-0 flex items-center justify-center px-6 text-center text-xs leading-relaxed text-[var(--chef-muted)]">
-            This browser can’t preview this format — processing still works, and the Output
-            below is a WAV you can play and export.
-          </p>
-        )}
-        {busy && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[var(--chef-panel)]/70 text-xs text-[var(--chef-accent-strong)]">
-            baking…
+      <div className="px-4 pb-3 pt-4">
+        {/* The overlays cover the waveform only; the spectrogram below is drawn by the
+            backend, so it still shows for formats this browser cannot preview. */}
+        <div className="relative">
+          {/* The container is always mounted and always laid out at full width -- the
+              instance lives in it across bakes, and hiding it would hand wavesurfer a
+              zero-width canvas to draw the next waveform into. */}
+          <div className="min-h-24">
+            <div ref={container} />
           </div>
-        )}
+          {!url && (
+            <p className="absolute inset-0 flex items-center justify-center text-center text-xs text-[var(--chef-muted)]">
+              {emptyHint}
+            </p>
+          )}
+          {undecodable && (
+            <p className="absolute inset-0 flex items-center justify-center px-6 text-center text-xs leading-relaxed text-[var(--chef-muted)]">
+              This browser can’t preview this format — processing still works, and the Output
+              below is a WAV you can play and export.
+            </p>
+          )}
+          {busy && (
+            <div className="absolute inset-0 flex items-center justify-center bg-[var(--chef-panel)]/70 text-xs text-[var(--chef-accent-strong)]">
+              baking…
+            </div>
+          )}
+        </div>
+        {url && <Spectrogram data={spectrogram} hint="drawing spectrogram…" />}
       </div>
     </section>
   )

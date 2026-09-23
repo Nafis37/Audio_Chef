@@ -1,7 +1,7 @@
 /**
  * Which operations have time parameters, and therefore a draggable region.
  *
- * Two of the seven ops select a span of the audio by seconds.  Typing those seconds blind
+ * Two of the ops select a span of the audio by seconds.  Typing those seconds blind
  * is the thing this table exists to remove: the linked card's numbers and the handles on
  * the Input waveform are two views of the same pair of parameters.
  *
@@ -9,6 +9,8 @@
  * third time-based operation is one entry and no component changes.  The param NAMES must
  * match the backend schema in dsp_engine.py exactly -- they are what /process receives.
  */
+
+import type { ParamValue } from './types'
 
 export interface RegionBinding {
   /** Parameter holding the start of the span, in seconds. */
@@ -19,6 +21,15 @@ export interface RegionBinding {
   color: string
   /** Shown on the waveform header while this op is linked. */
   label: string
+  /** When the region applies at all -- e.g. the noise window only in "region" mode. */
+  when?: (params: Record<string, ParamValue>) => boolean
+}
+
+/** The binding for a step, or undefined when the op has none or it is switched off. */
+export function regionFor(op: string, params: Record<string, ParamValue>): RegionBinding | undefined {
+  const binding = REGION_OPS[op]
+  if (!binding || (binding.when && !binding.when(params))) return undefined
+  return binding
 }
 
 export const REGION_OPS: Record<string, RegionBinding> = {
@@ -35,7 +46,9 @@ export const REGION_OPS: Record<string, RegionBinding> = {
     start: 'noise_start',
     end: 'noise_end',
     color: 'rgba(245, 158, 11, 0.22)',
-    label: 'Noise profile window',
+    label: 'Noise-only stretch',
+    // "Automatically" needs no region; only "From a part I mark" does.
+    when: (params) => params.profile === 'region',
   },
 }
 
