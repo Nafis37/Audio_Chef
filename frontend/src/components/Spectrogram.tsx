@@ -11,7 +11,7 @@
  */
 
 import { memo, useEffect, useRef } from 'react'
-import type { SpectrogramData } from '../types'
+import type { SpectrogramData, SpectrogramMarker } from '../types'
 
 /**
  * 256 RGB entries, interpolated between a few stops: near-black -> the app's greens ->
@@ -49,9 +49,14 @@ interface Props {
   data: SpectrogramData | null
   /** Shown when there is no picture (yet). */
   hint?: string
+  /**
+   * Labelled dashed lines across the picture -- a Filter step's cutoff.  Drawn on the
+   * Input AND the Output so both are read against the same line (see filterMarkers.ts).
+   */
+  markers?: SpectrogramMarker[]
 }
 
-function SpectrogramImpl({ data, hint = '' }: Props) {
+function SpectrogramImpl({ data, hint = '', markers = [] }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
@@ -97,6 +102,22 @@ function SpectrogramImpl({ data, hint = '' }: Props) {
             >
               {tickLabel(hz)}
             </span>
+          )
+        })}
+      {data &&
+        markers.map(({ hz, label }) => {
+          const at = position(hz)
+          if (at <= 0 || at >= 1) return null
+          return (
+            <div
+              key={`${label}-${hz}`}
+              className="pointer-events-none absolute inset-x-0 border-t border-dashed border-white/90"
+              style={{ top: `${(1 - at) * 100}%` }}
+            >
+              <span className="absolute right-1 -translate-y-full rounded-sm bg-black/60 px-1 font-mono text-[9px] font-semibold text-white">
+                {label}
+              </span>
+            </div>
           )
         })}
       {!data && (

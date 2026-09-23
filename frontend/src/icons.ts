@@ -6,6 +6,7 @@
 
 import {
   AudioLines,
+  Filter,
   Gauge,
   Layers,
   Mic,
@@ -22,6 +23,7 @@ import {
 const ICONS: Record<string, LucideIcon> = {
   Waves,
   SlidersHorizontal,
+  Filter,
   AudioLines,
   Scissors,
   Gauge,

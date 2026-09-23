@@ -8,6 +8,7 @@
 import type {
   BakeResult,
   BakeStats,
+  FilterResponse,
   OperationDef,
   ProcessGraphRequest,
   RecipeStep,
@@ -109,4 +110,23 @@ export async function fetchSpectrogram(
     fMax: Number(response.headers.get('X-Spec-Fmax')),
     pixels: new Uint8Array(await response.arrayBuffer()),
   }
+}
+
+/**
+ * GET /filter/response -- the Filter card's frequency-response curve, evaluated by the
+ * backend from the same coefficients the bake runs (backend/app/dsp/filters.py).
+ */
+export async function fetchFilterResponse(
+  params: { mode: string; cutoff: number; order: string; q: number },
+  signal?: AbortSignal,
+): Promise<FilterResponse> {
+  const query = new URLSearchParams({
+    mode: params.mode,
+    cutoff: String(params.cutoff),
+    order: params.order,
+    q: String(params.q),
+  })
+  const response = await fetch(`${BASE}/filter/response?${query}`, { signal })
+  if (!response.ok) throw new Error(await detail(response))
+  return response.json()
 }

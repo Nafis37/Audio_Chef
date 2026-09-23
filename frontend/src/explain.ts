@@ -17,6 +17,7 @@
  * by 100 below wherever the maths wants the 0..1 the backend actually uses.
  */
 
+import { bandEdges, hzLabel } from './filterMarkers'
 import type { OperationDef, ParamValue, RecipeStep } from './types'
 
 export interface StepExplanation {
@@ -166,6 +167,44 @@ const BUILDERS: Record<string, Builder> = {
           `toward it.`
         : 'Every band sits at 0 dB, so all three biquads are exactly unity — the output is the ' +
           'input, sample for sample.',
+    }
+  },
+
+  // filters.py -- RBJ biquads; low/high-pass are Butterworth cascades of N/2 sections.
+  filter: (get) => {
+    const mode = String(get('mode'))
+    const fc = Number(get('cutoff'))
+    const q = Number(get('q'))
+    const biquad = '(b₀ + b₁z⁻¹ + b₂z⁻²) / (1 + a₁z⁻¹ + a₂z⁻²)'
+    if (mode === 'lowpass' || mode === 'highpass') {
+      const n = Number(get('order'))
+      const low = mode === 'lowpass'
+      return {
+        equation: `H(z) = Π_{k=1..${n / 2}} ${biquad},   |H(${hzLabel(fc)})| = −3 dB`,
+        effect:
+          `${n / 2} Butterworth section${n > 2 ? 's' : ''} (order ${n}): flat ${low ? 'below' : 'above'} ` +
+          `${hzLabel(fc)}, exactly −3 dB at it, then −${6 * n} dB per octave ${low ? 'above' : 'below'} — ` +
+          `an octave past the cutoff is already ${6 * n} dB quieter. On the Output spectrogram ` +
+          `everything ${low ? 'above' : 'below'} the dashed line goes dark, and the sound turns ` +
+          `${low ? 'muffled' : 'thin'}.`,
+      }
+    }
+    if (mode === 'bandpass') {
+      const [lo, hi] = bandEdges(fc, q)
+      return {
+        equation: `H(z) = α(1 − z⁻²) / ((1+α) − 2cos(ω₀)z⁻¹ + (1−α)z⁻²),   α = sin(ω₀)/(2·${num(q, 1)})`,
+        effect:
+          `Keeps only ${hzLabel(lo)}–${hzLabel(hi)} (the −3 dB edges, ~${hzLabel(fc / q)} wide at Q ${num(q, 1)}), ` +
+          `0 dB at ${hzLabel(fc)}. Zeros at DC and Nyquist remove the lows and highs — the Output ` +
+          `spectrogram keeps one bright strip between the two dashed lines.`,
+      }
+    }
+    return {
+      equation: `H(z) = (1 − 2cos(ω₀)z⁻¹ + z⁻²) / ((1+α) − 2cos(ω₀)z⁻¹ + (1−α)z⁻²),   ω₀ = 2π·${hzLabel(fc)}/fs`,
+      effect:
+        `Two zeros sit ON the unit circle at ±ω₀, so ${hzLabel(fc)} is removed completely while ` +
+        `the rest stays at 0 dB; the dip is about ${hzLabel(fc / q)} wide (Q ${num(q, 1)}). On the ` +
+        `Output spectrogram a thin dark line appears at the dashed marker.`,
     }
   },
 

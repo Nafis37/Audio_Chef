@@ -39,6 +39,8 @@ export interface ParamDef {
    * by this before the DSP sees it.  Informational here -- the UI never converts.
    */
   scale?: number | null
+  /** Slider moves in equal ratios (e.g. every octave the same travel); the value is unchanged. */
+  log?: boolean
 }
 
 export interface OperationDef {
@@ -231,4 +233,18 @@ export interface SpectrogramData {
   fMin: number
   fMax: number
   pixels: Uint8Array
+}
+
+/** GET /filter/response -- the Filter card's curve, |H(e^{jw})| in dB on a log axis. */
+export interface FilterResponse {
+  freqs: number[]
+  db: number[]
+  cutoff: number
+  fs: number
+}
+
+/** A labelled horizontal line on a spectrogram, e.g. a filter's cutoff. */
+export interface SpectrogramMarker {
+  hz: number
+  label: string
 }

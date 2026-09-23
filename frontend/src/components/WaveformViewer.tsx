@@ -35,7 +35,7 @@ import { memo, useEffect, useImperativeHandle, useRef, useState, type Ref } from
 import WaveSurfer from 'wavesurfer.js'
 import RegionsPlugin, { type Region } from 'wavesurfer.js/dist/plugins/regions.esm.js'
 import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js'
-import type { SpectrogramData } from '../types'
+import type { SpectrogramData, SpectrogramMarker } from '../types'
 import { Spectrogram } from './Spectrogram'
 
 /** What App can do to a viewer from outside -- enough for an A/B switch. */
@@ -65,6 +65,8 @@ interface Props {
   onRegionChange?: (start: number, end: number) => void
   /** The hand-made spectrogram of the same audio; null while it is loading. */
   spectrogram?: SpectrogramData | null
+  /** Lines to draw across the spectrogram (a Filter step's cutoff). */
+  markers?: SpectrogramMarker[]
   /** Highlights the panel -- used by the A/B switch to show which one you are hearing. */
   highlighted?: boolean
   /** Fires when this viewer starts playing, so the parent can pause the other one. */
@@ -88,6 +90,7 @@ function WaveformViewerImpl({
   region,
   onRegionChange,
   spectrogram = null,
+  markers,
   highlighted = false,
   onPlay,
   children,
@@ -326,7 +329,7 @@ function WaveformViewerImpl({
             </div>
           )}
         </div>
-        {url && <Spectrogram data={spectrogram} hint="drawing spectrogram…" />}
+        {url && <Spectrogram data={spectrogram} hint="drawing spectrogram…" markers={markers} />}
       </div>
     </section>
   )

@@ -43,6 +43,7 @@ import { SourceTabs } from './components/SourceTabs'
 import { Toolbar } from './components/Toolbar'
 import { WaveformViewer, type RegionSpec, type WaveformHandle } from './components/WaveformViewer'
 import { sourceColor } from './colors'
+import { filterMarkers } from './filterMarkers'
 import type { Preset } from './presets'
 import { regionFor } from './regions'
 import { SourcesProvider, type SourceOption } from './sources'
@@ -297,6 +298,8 @@ export default function App() {
 
   const editingSource = sources.find((source) => source.id === editing) ?? null
   const recipe = useMemo(() => editingSource?.recipe ?? [], [editingSource])
+  // Every un-bypassed Filter step's cutoff, drawn across both spectrograms.
+  const cutoffMarkers = useMemo(() => filterMarkers(recipe), [recipe])
   const activeUid = editingSource?.activeUid ?? null
 
   // --- Bake -------------------------------------------------------------------------
@@ -851,6 +854,7 @@ export default function App() {
                   onRegionChange={onRegionChange}
                   ref={inputView}
                   spectrogram={inputSpectrograms.get(editing ?? '') ?? null}
+                  markers={cutoffMarkers}
                   highlighted={hearing === 'input'}
                   onPlay={onInputPlay}
                 >
@@ -867,6 +871,7 @@ export default function App() {
                   busy={showBusy}
                   ref={outputView}
                   spectrogram={output ? outputSpectrogram : null}
+                  markers={cutoffMarkers}
                   highlighted={hearing === 'output'}
                   onPlay={onOutputPlay}
                   emptyHint={

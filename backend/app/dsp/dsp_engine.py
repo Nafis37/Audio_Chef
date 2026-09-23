@@ -62,6 +62,7 @@ from .compressor import compressor
 from .echo_reverb import echo, reverb
 from .editor import splice, trim
 from .eq import equalizer
+from .filters import cutoff_filter
 from .noise import noise_reduce
 from .speed_pitch import speed_pitch
 from .voice_changer import voice_changer
@@ -82,13 +83,16 @@ from .voice_match import voice_match
 #   scale      the DSP value is  shown_value * scale.  Lets a 0..1 mix be shown and typed
 #              as 0..100 % while echo()/reverb() keep their natural units.  _coerce()
 #              applies it, so no handler ever sees a percentage.
+#   log        the slider moves in equal RATIOS, not equal steps (frequency: every octave
+#              gets the same travel).  UI only -- the value sent is still plain Hz.
 # --------------------------------------------------------------------------------------
 def _num(name, label, default, lo, hi, step=0.1, unit="", control="slider", *,
-         help="", advanced=False, show_when=None, scale=None):
+         help="", advanced=False, show_when=None, scale=None, log=False):
     return {
         "name": name, "label": label, "type": "float", "default": default,
         "min": lo, "max": hi, "step": step, "unit": unit, "control": control,
         "help": help, "advanced": advanced, "show_when": show_when, "scale": scale,
+        "log": log,
     }
 
 
@@ -264,6 +268,45 @@ OPERATIONS: list[dict[str, Any]] = [
                  help="Higher = a narrower mid band.", advanced=True),
             _num("treble_freq", "Treble corner", 4000.0, 1000.0, 16000.0, 50.0, "Hz",
                  help="Above this the treble control acts fully.", advanced=True),
+        ],
+    },
+    {
+        "id": "filter",
+        "label": "Filter",
+        "icon": "Filter",
+        "category": "Tone & level",
+        "summary": "Removes everything above (low-pass) or below (high-pass) a frequency, keeps "
+                   "one band, or notches one out.",
+        "how": "RBJ biquads via the bilinear transform; low/high-pass are Butterworth "
+               "cascades of N/2 sections.",
+        "listen_for": "Low-pass sounds muffled, high-pass thin, band-pass like a telephone. "
+                      "Dashed lines mark the cutoff on both spectrograms — on the Output "
+                      "everything past them goes dark.",
+        "handler": cutoff_filter,
+        "quick": {
+            "Muffled": {"mode": "lowpass", "cutoff": 500, "order": "8"},
+            "Telephone": {"mode": "bandpass", "cutoff": 1500, "q": 1.0},
+            "Thin": {"mode": "highpass", "cutoff": 1000, "order": "4"},
+            "Rumble cut": {"mode": "highpass", "cutoff": 80, "order": "4"},
+            "Hum notch": {"mode": "notch", "cutoff": 50, "q": 10.0},
+        },
+        "params": [
+            _enum("mode", "Type", "lowpass", ["lowpass", "highpass", "bandpass", "notch"],
+                  option_labels={"lowpass": "Low-pass", "highpass": "High-pass",
+                                 "bandpass": "Band-pass", "notch": "Notch"},
+                  help="Low-pass keeps the lows, high-pass the highs, band-pass one band, "
+                       "notch removes one band."),
+            _num("cutoff", "Frequency", 500.0, 20.0, 20000.0, 1.0, "Hz", log=True,
+                 help="The cutoff (low/high-pass, where it is 3 dB down) or the centre "
+                      "(band-pass, notch)."),
+            _enum("order", "Steepness", "4", ["2", "4", "6", "8"],
+                  option_labels={"2": "12 dB/oct", "4": "24 dB/oct", "6": "36 dB/oct",
+                                 "8": "48 dB/oct"},
+                  help="How fast it falls past the cutoff. Each step adds one more biquad.",
+                  show_when={"mode": ["lowpass", "highpass"]}),
+            _num("q", "Width (Q)", 2.0, 0.3, 30.0, 0.1, "",
+                 help="Higher = a narrower band. The band is about frequency / Q wide.",
+                 show_when={"mode": ["bandpass", "notch"]}),
         ],
     },
     {

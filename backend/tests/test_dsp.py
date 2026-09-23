@@ -24,6 +24,7 @@ from app.dsp.dsp_engine import (
 from app.dsp.echo_reverb import echo, reverb
 from app.dsp.editor import splice, trim
 from app.dsp.eq import equalizer, high_shelf_coefficients, low_shelf_coefficients
+from app.dsp.filters import butterworth_qs, cutoff_filter, filter_response, sections
 from app.dsp.noise import noise_reduce
 from app.dsp.spectrogram import DB_FLOOR, ROWS, spectrogram_image
 from app.dsp.speed_pitch import speed_pitch
@@ -139,6 +140,67 @@ def test_flat_equalizer_is_the_identity():
 
 
 # --------------------------------------------------------------------------- echo_reverb.py
+# --------------------------------------------------------------------------- filters.py
+def _cascade_db(mode: str, fc: float, order: str, f: float, q: float = 2.0) -> float:
+    """Response of the whole cascade: the sections' dB simply add."""
+    return sum(_response_db(b, a, f) for b, a in sections(FS, mode, fc, order, q))
+
+
+def test_butterworth_qs_are_the_pole_pairs():
+    assert butterworth_qs(2) == pytest.approx([0.7071], abs=1e-4)
+    assert butterworth_qs(4) == pytest.approx([0.5412, 1.3066], abs=1e-4)
+
+
+@pytest.mark.parametrize("order", ["2", "4", "6", "8"])
+def test_lowpass_is_3db_down_at_the_cutoff_and_falls_6n_db_per_octave(order):
+    n = int(order)
+    assert _cascade_db("lowpass", 1000.0, order, 1000.0) == pytest.approx(-3.01, abs=0.1)
+    assert _cascade_db("lowpass", 1000.0, order, 100.0) == pytest.approx(0.0, abs=0.1)
+    assert _cascade_db("lowpass", 1000.0, order, 2000.0) <= -6.0 * n
+
+
+@pytest.mark.parametrize("order", ["2", "4", "6", "8"])
+def test_highpass_mirrors_the_lowpass(order):
+    n = int(order)
+    assert _cascade_db("highpass", 1000.0, order, 1000.0) == pytest.approx(-3.01, abs=0.1)
+    assert _cascade_db("highpass", 1000.0, order, 10000.0) == pytest.approx(0.0, abs=0.1)
+    assert _cascade_db("highpass", 1000.0, order, 500.0) <= -6.0 * n
+
+
+def test_bandpass_peaks_at_0db_and_notch_removes_its_centre():
+    assert _cascade_db("bandpass", 1500.0, "4", 1500.0, q=1.0) == pytest.approx(0.0, abs=0.01)
+    assert _cascade_db("bandpass", 1500.0, "4", 150.0, q=1.0) < -15.0
+    assert _cascade_db("notch", 1000.0, "4", 1000.0, q=10.0) < -60.0
+    assert _cascade_db("notch", 1000.0, "4", 4000.0, q=10.0) == pytest.approx(0.0, abs=0.1)
+
+
+def test_lowpass_removes_the_high_tone_and_keeps_the_low_one():
+    x = sine(300.0, amp=0.3) + sine(4000.0, amp=0.3)
+    y = cutoff_filter(x, FS, mode="lowpass", cutoff=500.0, order="4")
+    assert dominant_hz(y) == pytest.approx(300.0, abs=2.0)
+    spectrum = lambda s: np.abs(np.fft.rfft(s[FS // 4:]))      # past the start-up transient
+    k = int(round(4000.0 * (FS - FS // 4) / FS))
+    drop_db = 20.0 * np.log10(spectrum(y)[k] / spectrum(x)[k])
+    assert drop_db < -40.0
+
+
+def test_response_curve_is_the_filter_that_runs():
+    freqs, db = filter_response(FS, "lowpass", 800.0, "6", 2.0)
+    assert np.all(np.isfinite(db)) and freqs[0] == pytest.approx(20.0)
+    at = np.argmin(np.abs(freqs - 800.0))
+    assert db[at] == pytest.approx(_cascade_db("lowpass", 800.0, "6", freqs[at]), abs=1e-6)
+    _, notch = filter_response(FS, "notch", 1000.0, "4", 10.0)
+    assert np.all(np.isfinite(notch))                    # the exact zero is floored, not -inf
+
+
+def test_filter_response_route_clamps_and_returns_json():
+    from app.routers.process import filter_response as route
+
+    body = route(mode="nonsense", cutoff=1e9, order="3", q=-5.0, fs=FS)
+    assert body["cutoff"] == 20000.0                     # clamped to the slider's max
+    assert len(body["freqs"]) == len(body["db"]) and all(np.isfinite(body["db"]))
+
+
 def _comb_feedback_reference(x: np.ndarray, d: int, g: float) -> np.ndarray:
     """y[n] = x[n] + g*y[n-D], one sample at a time: the readable definition."""
     y = np.zeros_like(x)

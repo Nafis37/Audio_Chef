@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 
 from .. import config
 from ..audio_io import load_audio_at, probe, resolve_source, write_wav_bytes
-from ..dsp import analysis, dsp_engine, graph
+from ..dsp import analysis, dsp_engine, filters, graph
 
 router = APIRouter()
 
@@ -90,6 +90,29 @@ class ProcessRequest(BaseModel):
 def list_operations() -> list[dict]:
     """The tool catalogue and its parameter schemas (min/max/step/default/unit)."""
     return dsp_engine.operations_schema()
+
+
+@router.get("/filter/response")
+def filter_response(
+    mode: str = "lowpass",
+    cutoff: float = 500.0,
+    order: str = "4",
+    q: float = 2.0,
+    fs: int = config.DEFAULT_SAMPLE_RATE,
+) -> dict[str, Any]:
+    """The Filter card's frequency-response curve: |H(e^{jw})| in dB on a log axis.
+
+    Values go through the same schema coercion as a bake (clamp, never reject), and the
+    curve is evaluated from the very coefficients cutoff_filter() runs -- so the picture
+    on the card is the filter that is applied, not a sketch of it.
+    """
+    schema = {p["name"]: p for p in dsp_engine._BY_ID["filter"]["params"]}
+    supplied = {"mode": mode, "cutoff": cutoff, "order": order, "q": q}
+    params = {name: dsp_engine._coerce(schema[name], value) for name, value in supplied.items()}
+    fs = int(np.clip(fs, 8000, config.MAX_PROJECT_SAMPLE_RATE))
+    freqs, db = filters.filter_response(fs, **params)
+    return {"freqs": np.round(freqs, 2).tolist(), "db": np.round(db, 2).tolist(),
+            "cutoff": params["cutoff"], "fs": fs}
 
 
 def _validate(request: ProcessRequest) -> None:

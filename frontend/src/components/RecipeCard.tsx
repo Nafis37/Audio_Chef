@@ -29,6 +29,7 @@ import type { DraggableProvided } from '@hello-pangea/dnd'
 import { ChevronRight, Ear, GripVertical, Info, TriangleAlert, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { iconFor } from '../icons'
+import { FilterResponse } from './FilterResponse'
 import { regionFor } from '../regions'
 import { useSources } from '../sources'
 import {
@@ -41,6 +42,9 @@ import {
 
 /** How often a dragged slider is allowed to push a value up into App's state. */
 const THROTTLE_MS = 80
+
+/** Resolution of a `log` slider: this many positions from min to max. */
+const LOG_STEPS = 1000
 
 interface Props {
   step: RecipeStep
@@ -300,6 +304,17 @@ function Control({
     )
   }
 
+  // A log slider: the thumb position is log(value), so 20 Hz → 200 Hz takes the same
+  // travel as 2 kHz → 20 kHz.  The value itself (what is sent) is still plain units.
+  const log = Boolean(param.log) && param.min !== undefined && param.min > 0
+  const toPosition = (v: number) =>
+    (LOG_STEPS * Math.log(v / param.min!)) / Math.log(param.max! / param.min!)
+  const fromPosition = (p: number) => {
+    const v = param.min! * (param.max! / param.min!) ** (p / LOG_STEPS)
+    const step = param.step ?? 1
+    return Math.min(param.max!, Math.max(param.min!, Math.round(v / step) * step))
+  }
+
   // Default: a slider with a live numeric readout.
   return (
     <label className="block py-1 text-xs">
@@ -309,15 +324,27 @@ function Control({
           {formatValue(param, Number(live))}
         </span>
       </span>
-      <input
-        type="range"
-        className="mt-1.5 w-full"
-        value={Number(live)}
-        min={param.min}
-        max={param.max}
-        step={param.step}
-        onChange={(event) => setLive(Number(event.target.value))}
-      />
+      {log ? (
+        <input
+          type="range"
+          className="mt-1.5 w-full"
+          value={toPosition(Number(live))}
+          min={0}
+          max={LOG_STEPS}
+          step={1}
+          onChange={(event) => setLive(fromPosition(Number(event.target.value)))}
+        />
+      ) : (
+        <input
+          type="range"
+          className="mt-1.5 w-full"
+          value={Number(live)}
+          min={param.min}
+          max={param.max}
+          step={param.step}
+          onChange={(event) => setLive(Number(event.target.value))}
+        />
+      )}
     </label>
   )
 }
@@ -509,6 +536,9 @@ function RecipeCardImpl({
           </details>
         )}
       </div>
+
+      {/* The filter's own picture: its frequency response, from the coefficients it runs. */}
+      {definition.id === 'filter' && <FilterResponse values={values} bypassed={step.bypass} />}
 
       {definition.listen_for && (
         <p className="flex items-start gap-1.5 border-t border-[var(--chef-border)] px-3 py-1.5 text-[11px] leading-snug text-[var(--chef-muted)]">
