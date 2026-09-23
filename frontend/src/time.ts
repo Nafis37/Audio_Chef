@@ -23,11 +23,13 @@ export function formatTime(seconds: number, decimals = 0): string {
 
 /**
  * Label steps a ruler may use, in seconds, each with the tick step that subdivides it
- * into round pieces (1 s -> 0.2 s ticks, 15 s -> 5 s ticks, 30 s -> 5 s ticks ...).
+ * into round pieces (1 s -> 0.5 s ticks, 15 s -> 5 s ticks, 30 s -> 10 s ticks ...).
+ * Labels are whole seconds only: "0:00.5"-style labels crowded the ruler, and the
+ * unlabelled ticks already mark the halves.
  */
 const NICE_STEPS: Array<[label: number, tick: number]> = [
-  [0.1, 0.02], [0.2, 0.05], [0.5, 0.1], [1, 0.2], [2, 0.5], [5, 1], [10, 2],
-  [15, 5], [30, 5], [60, 10], [120, 30], [300, 60], [600, 120],
+  [1, 0.5], [2, 1], [5, 1], [10, 5], [15, 5], [30, 10], [60, 15], [120, 30],
+  [300, 60], [600, 120],
 ]
 
 export interface RulerSpacing {
@@ -40,9 +42,9 @@ export interface RulerSpacing {
 }
 
 /** The smallest round label step that keeps labels at least `minLabelPx` apart. */
-export function rulerSpacing(duration: number, widthPx: number, minLabelPx = 72): RulerSpacing {
+export function rulerSpacing(duration: number, widthPx: number, minLabelPx = 120): RulerSpacing {
   const pxPerSec = duration > 0 && widthPx > 0 ? widthPx / duration : 100
   const [label, tick] =
     NICE_STEPS.find(([step]) => step * pxPerSec >= minLabelPx) ?? NICE_STEPS[NICE_STEPS.length - 1]
-  return { label, tick, decimals: label < 1 ? 1 : 0 }
+  return { label, tick, decimals: 0 }
 }
