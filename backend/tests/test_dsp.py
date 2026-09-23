@@ -329,14 +329,15 @@ def test_percent_params_are_scaled_for_the_handler():
 
 
 def test_every_default_is_audible():
-    # Dropping a card in with no tweaks must change the sound.  (The editor and assemble
-    # need a selection or a second file first, so they are exempt.)
+    # Dropping a card in with no tweaks must change the sound.  (The editor, assemble and
+    # voice_match need a selection or other files first, so they are exempt -- voice_match
+    # is covered with its references in test_voice_match.py.)
     # Speech-like on purpose: a loud half and a quiet half (a compressor with auto-makeup
     # is rightly a no-op on a constant level) over a little hiss (for the noise remover).
     x = np.concatenate([sine(300.0, 0.5, amp=0.4), sine(300.0, 0.5, amp=0.04)])
     x = x + 0.02 * np.random.default_rng(5).standard_normal(x.size)
     for op in OPERATIONS:
-        if op["id"] in {"editor", "assemble"} or op.get("hidden"):
+        if op["id"] in {"editor", "assemble", "voice_match"} or op.get("hidden"):
             continue
         y = run_recipe(x, FS, [{"op": op["id"]}])
         n = min(x.size, y.size)

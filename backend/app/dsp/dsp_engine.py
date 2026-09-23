@@ -65,6 +65,7 @@ from .eq import equalizer
 from .noise import noise_reduce
 from .speed_pitch import speed_pitch
 from .voice_changer import voice_changer
+from .voice_match import voice_match
 
 
 # --------------------------------------------------------------------------------------
@@ -148,6 +149,22 @@ def _assemble_op(x, fs, ctx, source="", mode="mix", position=0.0,
     if mode == "append":
         return mixer.append_to(x, clip, fs, gain_db=gain)
     return mixer.mix_at(x, clip, fs, position=position, gain_db=gain)
+
+
+def _voice_match_op(x, fs, ctx, calibration_source="", reference_source="",
+                    pitch_strength=1.0, timbre_strength=0.7):
+    """Convert this source toward the reference speaker, calibrated on two other sources.
+
+    Both strengths at 0 is an exact bypass -- the buffer comes back untouched, and the
+    calibration takes are not even read.
+    """
+    if pitch_strength <= 0.0 and timbre_strength <= 0.0:
+        return x
+    profile = ctx.voice_profile(calibration_source, reference_source)
+    y, diagnostics = voice_match(x, fs, profile, pitch_strength=pitch_strength,
+                                 timbre_strength=timbre_strength)
+    ctx.note({**profile.diagnostics, **diagnostics})
+    return y
 
 
 def _echo_reverb_legacy(x, fs, mode="echo", delay=0.3, feedback=0.4, room_size=0.5,
@@ -392,6 +409,39 @@ OPERATIONS: list[dict[str, Any]] = [
                  help="Blend with the original voice.", advanced=True),
         ],
     },
+    {
+        "id": "voice_match",
+        "label": "Voice Match",
+        "icon": "UsersRound",
+        "category": "Voice",
+        "summary": "Move your voice toward another speaker's, learned from one shared "
+                   "script you both read.",
+        "how": "Autocorrelation pitch + cepstral envelopes, DTW-aligned into a paired "
+               "codebook; a time-varying phase-locked pitch shift, then an envelope "
+               "correction toward the looked-up target.",
+        "listen_for": "The pitch lands in the other speaker's range without a chipmunk "
+                      "sound, and the vowels take on their colour. Silences and 's' "
+                      "sounds stay as they were.",
+        "handler": _voice_match_op,
+        "needs_ctx": True,
+        "quick": {
+            "Pitch only": {"pitch_strength": 100, "timbre_strength": 0},
+            "Timbre only": {"pitch_strength": 0, "timbre_strength": 70},
+            "Full": {"pitch_strength": 100, "timbre_strength": 70},
+        },
+        "params": [
+            _source("calibration_source", "Your calibration",
+                    help="YOUR reading of the shared script (30-60 s, at most 2 min). Record "
+                         "it cleanly, with the same mic placement as the other speaker."),
+            _source("reference_source", "Their calibration",
+                    help="The OTHER speaker's reading of the same script."),
+            _pct("pitch_strength", "Pitch", 100,
+                 help="How far to move your pitch into their range. 0 keeps your own pitch."),
+            _pct("timbre_strength", "Timbre", 70,
+                 help="How far to move your vowel colour (formants) toward theirs. Frames "
+                      "unlike anything in the calibration get less."),
+        ],
+    },
     # ---- Edit ------------------------------------------------------------------------
     {
         "id": "editor",
@@ -526,7 +576,7 @@ def run_recipe_measured(
     recipe ran to the end -- so the UI can explain the output instead of just drawing it.
 
     `ctx` is the graph handle for operations that reach outside their own buffer (see
-    _assemble_op).  It is None for the master chain, which has no source identity for a
+    _assemble_op and _voice_match_op).  It is None for the master chain, which has no source identity for a
     clip position to be relative to.
 
     `clip` is False for an INTERMEDIATE chain -- one whose output feeds another chain
@@ -557,8 +607,9 @@ def run_recipe_measured(
         if definition.get("needs_ctx"):
             if ctx is None:
                 raise ValueError(
-                    f"{op_id!r} only works inside a source's recipe -- the master chain "
-                    "has no position for a clip to be placed relative to."
+                    f"{definition['label']!r} only works inside a source's recipe -- it "
+                    "reads other loaded sources, and the master chain has no source of "
+                    "its own."
                 )
             y = definition["handler"](y, fs, ctx=ctx, **kwargs)
         else:

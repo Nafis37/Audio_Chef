@@ -588,7 +588,7 @@ export default function App() {
     [sources, outputId, master.length],
   )
 
-  /** Everything an assemble card in THIS chain may point at.
+  /** Everything an assemble / voice_match card in THIS chain may point at.
    *
    *  The chain's own source is filtered out: a source referencing itself is always a
    *  cycle, so offering it would only ever produce a backend error. */

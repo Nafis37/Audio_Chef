@@ -3,7 +3,7 @@ The source graph -- resolving one recipe per source, plus a master chain
 =======================================================================
 A project is no longer one buffer and one recipe.  It is a set of named sources, each
 with its own chain, and an `assemble` card inside a chain can pull in the PROCESSED
-output of another source.  That makes the set a DAG rather than a list, and this module
+output of another source (so can `voice_match`, which reads two calibration takes).  That makes the set a DAG rather than a list, and this module
 is what walks it.
 
     evaluate(sources, master, output_source, ...) -> (samples, fs, report)
@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from . import dsp_engine, editor
+from . import dsp_engine, editor, voice_calibration
 
 # A chain that assembles a chain that assembles ... this deep is not a real edit; it is
 # almost certainly a mistake, and the recursion has to stop somewhere regardless.
@@ -48,10 +48,11 @@ class GraphError(ValueError):
 
 
 class ClipContext:
-    """What an `assemble` handler is handed so it can reach another source.
+    """What a graph-aware handler (`assemble`, `voice_match`) is handed to reach other sources.
 
-    Deliberately tiny: a handler gets exactly one verb, `clip()`, and no way to touch
-    the evaluator's caches, the file store or the rest of the graph.
+    Deliberately tiny: a handler gets a few verbs -- `clip()`, `voice_profile()` and
+    `note()` -- and no way to touch the evaluator's caches, the file store or the rest of
+    the graph.
     """
 
     def __init__(self, evaluator: "Evaluator", owner: str) -> None:
@@ -80,6 +81,35 @@ class ClipContext:
         # source that the next card is about to read.
         return np.array(segment, dtype=np.float64, copy=True)
 
+    def voice_profile(self, calibration_id: str, reference_id: str):
+        """The calibration profile for (your take, reference take), built at most once.
+
+        Both takes are the sources' PROCESSED output, so a Cut & Trim or Noise Remover on
+        a calibration source is honoured.  Resolving them goes through processed(), which
+        is what catches a deleted source or a cycle.
+        """
+        calibration_id = (calibration_id or "").strip()
+        reference_id = (reference_id or "").strip()
+        if not calibration_id:
+            raise GraphError("Voice Match has no calibration take selected (your reading "
+                             "of the shared script).")
+        if not reference_id:
+            raise GraphError("Voice Match has no reference take selected (the other "
+                             "speaker's reading of the same script).")
+        if calibration_id == reference_id:
+            raise GraphError("Voice Match needs two different calibration sources -- your "
+                             "reading and the other speaker's reading.")
+        if self._owner in (calibration_id, reference_id):
+            raise GraphError(
+                f"Source {self._owner!r} cannot be its own calibration take -- record the "
+                "speech to convert as a separate source."
+            )
+        return self._evaluator.voice_profile(calibration_id, reference_id)
+
+    def note(self, row: dict[str, Any]) -> None:
+        """Attach a compact diagnostics row to the bake report."""
+        self._evaluator.voice_match.append({"id": self._owner, **row})
+
 
 class Evaluator:
     """Resolves each source's chain at most once, detecting cycles as it goes."""
@@ -94,6 +124,8 @@ class Evaluator:
         self._stack: list[str] = []                # in-progress, IN ORDER, for the path
         self._reports: dict[str, dict[str, Any]] = {}
         self.resampled: list[str] = []             # ids whose file rate != project rate
+        self._profiles: dict[tuple[str, str], Any] = {}   # (cal, ref) -> VoiceProfile
+        self.voice_match: list[dict[str, Any]] = []       # diagnostics rows, for the report
 
     # -- raw input ---------------------------------------------------------------------
     def raw(self, source_id: str) -> np.ndarray:
@@ -158,6 +190,19 @@ class Evaluator:
         self._done[source_id] = result
         self._reports[source_id] = report
         return result
+
+    # -- voice calibration -------------------------------------------------------------
+    def voice_profile(self, calibration_id: str, reference_id: str):
+        """Memoised per (cal, ref) for this evaluation; voice_calibration.get_profile adds
+        a content-keyed cache across evaluations, so Auto-Bake does not re-align."""
+        key = (calibration_id, reference_id)
+        profile = self._profiles.get(key)
+        if profile is None:
+            profile = voice_calibration.get_profile(
+                self.processed(calibration_id), self.processed(reference_id), self.fs
+            )
+            self._profiles[key] = profile
+        return profile
 
     # -- reporting ---------------------------------------------------------------------
     def source_rows(self) -> list[dict[str, Any]]:
@@ -233,8 +278,8 @@ def evaluate(
     raw_input = evaluator.raw(output_source)
 
     if apply_master and master:
-        # No ctx: the master chain has no source identity of its own, so an assemble card
-        # here has nothing to be relative to.  run_recipe_measured raises on that, which
+        # No ctx: the master chain has no source identity of its own, so an assemble or
+        # voice_match card here has nothing to be relative to.  run_recipe_measured raises on that, which
         # the router turns into a readable 400.
         final, master_report = dsp_engine.run_recipe_measured(
             rendered, fs, [step.model_dump() for step in master]
@@ -256,4 +301,6 @@ def evaluate(
         "resampled": evaluator.resampled,
         "sources": evaluator.source_rows(),
     }
+    if evaluator.voice_match:
+        report["voice_match"] = evaluator.voice_match
     return final, raw_input, report

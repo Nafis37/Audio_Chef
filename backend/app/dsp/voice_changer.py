@@ -75,6 +75,17 @@ so the duration can never drift.
     Formants move with the harmonics (nothing here separates the envelope from the
     source), which is why +7 st sounds like a chipmunk and not a soprano.
 
+(d) A ratio that changes from frame to frame.  Nothing in (a)-(c) needs r to be constant:
+    frame t is moved by its own r_t, and the recursion simply uses the ratio of the frame
+    it is advancing INTO:
+
+        psi[t,p'_t] = psi[t-1,p'_t] + r_t * omega[t,p] * H
+
+    The phase accumulator is continuous across the change, so a smoothly varying r_t (a
+    pitch contour) glides instead of clicking.  shift_spectrum() is this general form;
+    shift_pitch_bins() calls it with r_t = r for every t, and voice_match.py with a
+    per-frame contour.
+
 
 2. robot -- one phase for every frame
 -------------------------------------
@@ -130,23 +141,22 @@ _WHISPER_HOP = 128
 _WHISPER_SEED = 0x5EED1E55
 
 
-def shift_pitch_bins(
-    x: np.ndarray,
-    semitones: float,
+def shift_spectrum(
+    spec: np.ndarray,
+    ratios: np.ndarray,
     n_fft: int = DEFAULT_N_FFT,
     hop: int = DEFAULT_HOP,
 ) -> np.ndarray:
-    """Mode 1: move every spectral lobe to r times its frequency (docstring section 1)."""
-    x = np.asarray(x, dtype=np.float64)
-    if x.size == 0 or abs(semitones) < 1e-9:
-        return x
+    """Move every lobe of frame t to ratios[t] times its frequency (docstring section 1).
 
-    r = 2.0 ** (float(semitones) / 12.0)          # pitch ratio, equal temperament
-
-    spec = stft(x, n_fft, hop)                    # (frames, bins)
+    Takes and returns an STFT so a caller can reshape the magnitudes afterwards (voice_match
+    corrects the envelope) before the one ISTFT.  With a constant `ratios` this is exactly
+    the fixed shift; with a varying one it is section 1(d).
+    """
     mag = np.abs(spec)
     phi = np.angle(spec)
     n_frames, n_bins = spec.shape
+    ratios = np.broadcast_to(np.asarray(ratios, dtype=np.float64), (n_frames,))
 
     k = np.arange(n_bins)
     w_k = 2.0 * np.pi * k / n_fft                 # bin centre frequency, rad/sample
@@ -154,6 +164,7 @@ def shift_pitch_bins(
     out = np.zeros_like(spec)
     psi_prev = np.zeros(n_bins)                   # last frame's OUTPUT phase, per bin
     for t in range(n_frames):
+        r = ratios[t]
         peaks = spectral_peaks(mag[t])
         if peaks.size == 0:                       # silent frame: nothing to move
             psi_prev = np.zeros(n_bins)
@@ -187,6 +198,23 @@ def shift_pitch_bins(
         out[t] = frame_mag * np.exp(1j * frame_phase)
         psi_prev = frame_phase
 
+    return out
+
+
+def shift_pitch_bins(
+    x: np.ndarray,
+    semitones: float,
+    n_fft: int = DEFAULT_N_FFT,
+    hop: int = DEFAULT_HOP,
+) -> np.ndarray:
+    """Mode 1: move every spectral lobe to r times its frequency (docstring section 1)."""
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0 or abs(semitones) < 1e-9:
+        return x
+
+    r = 2.0 ** (float(semitones) / 12.0)          # pitch ratio, equal temperament
+    spec = stft(x, n_fft, hop)                    # (frames, bins)
+    out = shift_spectrum(spec, np.full(spec.shape[0], r), n_fft, hop)
     return istft(out, hop=hop, n_fft=n_fft, length=x.size)
 
 

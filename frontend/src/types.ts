@@ -164,6 +164,31 @@ export interface SourceReport {
   truncated: boolean
 }
 
+/** What one Voice Match card reported: calibration feedback, never a similarity score. */
+export interface VoiceMatchReport {
+  /** The source whose recipe holds the card. */
+  id: string
+  /** Seconds of voiced speech found in each calibration take. */
+  cal_voiced_s: number
+  ref_voiced_s: number
+  /** Median pitch of each speaker's calibration take, Hz. */
+  cal_f0_hz: number
+  ref_f0_hz: number
+  /** Spread (standard deviation) of each speaker's pitch, in semitones. */
+  cal_f0_spread_st: number
+  ref_f0_spread_st: number
+  /** DTW path cost relative to random frame pairs: lower = the takes lined up better. */
+  align_cost: number
+  /** Paired calibration frames available to look up. */
+  codebook: number
+  /** Voiced seconds in the speech being converted. */
+  voiced_s: number
+  /** Share of voiced frames unlike the calibration, which got less timbre change. */
+  reduced_fraction: number
+  /** Median pitch shift applied, semitones. */
+  shift_st: number
+}
+
 /** The X-Bake-Stats header: both buffers measured, plus what the graph walk did. */
 export interface BakeStats {
   sample_rate: number
@@ -186,6 +211,8 @@ export interface BakeStats {
   steps_bypassed: number
   /** A step emptied the buffer and the fold stopped early. */
   truncated: boolean
+  /** One row per Voice Match card that ran; absent when there were none. */
+  voice_match?: VoiceMatchReport[]
 }
 
 /** Result of a bake: the rendered audio plus what the backend reported about it. */

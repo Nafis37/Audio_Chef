@@ -310,6 +310,31 @@ const BUILDERS: Record<string, Builder> = {
         wet,
     }
   },
+
+  // voice_match.py -- Gaussian log-pitch map, time-varying lobe shift, envelope correction.
+  voice_match: (get) => {
+    const sp = fraction(get, 'pitch_strength')
+    const st = fraction(get, 'timbre_strength')
+    if (sp <= 0 && st <= 0) {
+      return {
+        equation: 'y[n] = x[n]',
+        effect: 'Both strengths are 0, so the input passes through untouched.',
+      }
+    }
+    return {
+      equation:
+        `ρ[t] = ${num(sp)}·(μ_b + (σ_b/σ_a)(ln f₀[t] − μ_a) − ln f₀[t]),   ` +
+        `g[u,k] = (E_in − E_shifted) + ${num(st)}·rel[u]·D[u,k]  dB`,
+      effect:
+        `Each voiced frame's pitch is moved by e^ρ so your pitch range lands on the reference's ` +
+        `(μ, σ: mean and spread of log pitch in the two calibration takes); the ratio glides ` +
+        `between frames and fades to 1 in silence and on consonants. The shifted spectrum is then ` +
+        `reshaped: E_in − E_shifted puts the formants back where they were (no chipmunk), and ` +
+        `D — looked up from the 8 most similar calibration frames — moves them toward the ` +
+        `reference, scaled down where rel says the frame is unlike the calibration. Each frame ` +
+        `keeps its original loudness, and the length is unchanged.`,
+    }
+  },
 }
 
 /**

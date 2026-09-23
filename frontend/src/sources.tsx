@@ -1,5 +1,5 @@
 /**
- * The list of sources an `assemble` card may point at.
+ * The list of sources an `assemble` or `voice_match` card may point at.
  *
  * Every other control is generated entirely from the backend's parameter schema, but the
  * set of loaded files is a fact about this browser session that the DSP catalogue cannot
@@ -33,7 +33,7 @@ export function SourcesProvider({
   return <SourcesContext.Provider value={value}>{children}</SourcesContext.Provider>
 }
 
-/** The sources an assemble card in the CURRENT chain is allowed to reference. */
+/** The sources a source-picking card in the CURRENT chain is allowed to reference. */
 export function useSources(): SourceOption[] {
   return useContext(SourcesContext)
 }

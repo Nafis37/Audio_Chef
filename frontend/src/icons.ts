@@ -13,6 +13,7 @@ import {
   Repeat,
   Scissors,
   SlidersHorizontal,
+  UsersRound,
   Wand2,
   Waves,
   type LucideIcon,
@@ -28,6 +29,7 @@ const ICONS: Record<string, LucideIcon> = {
   Mic,
   Layers,
   Repeat,
+  UsersRound,
 }
 
 /** Falls back to a generic wand for any icon name we do not know about yet. */

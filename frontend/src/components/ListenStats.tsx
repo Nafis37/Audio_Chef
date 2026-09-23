@@ -192,6 +192,27 @@ function buildNotices(stats: BakeStats, recipe: RecipeStep[], operations: Operat
     })
   }
 
+  for (const vm of stats.voice_match ?? []) {
+    // Recording and matching feedback in plain numbers -- deliberately no "similarity %",
+    // which nothing here measures.
+    const reduced = Math.round(vm.reduced_fraction * 100)
+    const shift = vm.shift_st
+    notices.push({
+      tone: vm.align_cost > 0.5 || reduced > 40 ? 'warn' : 'info',
+      text:
+        `Voice Match calibration: you ${vm.cal_voiced_s.toFixed(0)} s voiced, median ` +
+        `${vm.cal_f0_hz.toFixed(0)} Hz; reference ${vm.ref_voiced_s.toFixed(0)} s voiced, median ` +
+        `${vm.ref_f0_hz.toFixed(0)} Hz. The takes lined up with cost ${vm.align_cost.toFixed(2)} ` +
+        `(lower is better; above 0.5 suggests different wording or noisy takes). ` +
+        `Pitch moved a median ${shift >= 0 ? '+' : ''}${shift.toFixed(1)} st. ` +
+        `${reduced}% of voiced frames were unlike anything in the calibration and got less timbre ` +
+        `change` +
+        (reduced > 40
+          ? ' — recording more calibration material, in the same room and mic position, will help.'
+          : '.'),
+    })
+  }
+
   if (stats.clipped > 0) {
     const over = (20 * Math.log10(stats.pre_clip_peak)).toFixed(1)
     const down = stats.normalised_db ?? 0
