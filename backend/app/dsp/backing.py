@@ -62,6 +62,9 @@ Voicing: the triad around C4 (midi 55..67), the bass on the root an octave or tw
         epiano   FM, ratio 1, struck on beats 1 and 3
         organ    additive sines at harmonics 1..4 (drawbars), held for the bar
         guitar   Karplus-Strong, strummed on every beat, down on the beat and up between
+        lofi     seventh chords (the triad plus scale[d+6]: maj7, m7, dom7) on a mellow FM
+                 piano, struck on beat 1 and the "and" of 2, over a lazy swung beat, then
+                 the whole bed through a "tape and vinyl" chain (section 6b)
         bass     a band-limited saw, low-passed but keeping harmonics 2-4: on a speaker
                  that cannot play the fundamental, the ear still hears the bass note
                  from them (the "missing fundamental" -- pitch is heard from the
@@ -77,6 +80,19 @@ Voicing: the triad around C4 (midi 55..67), the bass on the root an octave or tw
                 185 Hz sine (the drum head), e^{-t/0.12}              beats 2 and 4
         hat     white noise through an RBJ high-pass at 7 kHz, e^{-t/0.03}   every 8th,
                 the off-beats softer
+
+Lo-fi plays the kick on 1 and the "and" of 3 and SWINGS the off-beat hats: each one
+lands SWING = 62 % of the way through the beat instead of 50 %.
+
+6b. Lo-fi -- tape and vinyl
+---------------------------
+        warmth   two RBJ low-passes at LOFI_CUTOFF_HZ (a 4th-order roll-off: the top end
+                 of an old tape)
+        wow      a slowly varying delay  y(t) = b(t - d(t)),  d(t) = D (1 - cos 2 pi f_w t) / 2
+                 read by linear interpolation.  The instantaneous pitch is scaled by
+                 1 - d'(t), so the pitch drifts by at most pi f_w D -- a few cents
+        crackle  sparse random clicks (a Poisson process, ~CRACKLE_PER_S per second) each a
+                 short high-passed noise burst, plus faint hiss
 
 7. Volume, ducking and the edges
 --------------------------------
@@ -113,11 +129,11 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.signal import lfilter
 
-from .filters import bandpass_coefficients, highpass_coefficients
+from .filters import bandpass_coefficients, highpass_coefficients, lowpass_coefficients
 from .speech_analysis import analyse
 from .synth import adsr, extract_notes, fm_tone, fourier_tone, karplus_strong, midi_to_hz
 
-STYLES = ("pad", "epiano", "organ", "guitar")
+STYLES = ("pad", "epiano", "organ", "guitar", "lofi")
 CHORD_MODES = ("loop", "follow")
 PITCH_NAMES = ("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
 
@@ -139,6 +155,11 @@ FADE_OUT_S = 2.0
 NO_VOICE_DBFS = -20.0
 AUDIBLE_HZ = 150.0             # below this, small speakers play almost nothing
 MIX = {"chords": 1.6, "bass": 0.35, "drums": 0.6}
+SWING = 0.62                   # lo-fi: where the off-beat 8th lands, as a fraction of a beat
+LOFI_CUTOFF_HZ = 3200.0
+WOW_HZ = 0.5
+WOW_DEPTH_S = 0.0025           # pitch drift at most pi * WOW_HZ * WOW_DEPTH_S ~ 0.4 % ~ 7 cents
+CRACKLE_PER_S = 6.0
 
 
 @dataclass(frozen=True)
@@ -230,6 +251,13 @@ def plan_chords(notes, key: Key, fs: int, bar: int, total: int, mode: str) -> li
     return chords
 
 
+def seventh(key: Key, chord: Chord) -> int:
+    """The chord's diatonic seventh: two scale steps above its fifth (section 5, lofi)."""
+    scale = [(key.tonic + s) % 12 for s in SCALES[key.mode]]
+    fifth = chord.pcs[2]
+    return scale[(scale.index(fifth) + 2) % 7] if fifth in scale else (chord.root + 10) % 12
+
+
 def voicing(chord: Chord) -> tuple[list[int], int]:
     """(triad note numbers around C4, bass note number) -- section 4."""
     root = 55 + (chord.root - 55) % 12                  # 55..66
@@ -280,6 +308,16 @@ def _struck(midis: list[int], length: int, fs: int) -> np.ndarray:
     return out * fade / len(midis)
 
 
+def _mellow(midis: list[int], length: int, fs: int) -> np.ndarray:
+    """lofi: a soft FM piano -- low index, so few sidebands -- ringing out."""
+    out = sum(fm_tone(np.full(length, float(midi_to_hz(m))), fs, 1.0, 1.2, 0.5, 2.0)
+              for m in midis)
+    fade = np.ones(length)
+    tail = min(length, int(0.08 * fs))
+    fade[length - tail:] = np.linspace(1.0, 0.0, tail)
+    return out * fade / len(midis)
+
+
 def _strum(midis: list[int], length: int, fs: int, down: bool, rng) -> np.ndarray:
     """guitar: the notes one after another, STRUM_S apart."""
     out = np.zeros(length)
@@ -324,6 +362,28 @@ def hat(fs: int, rng) -> np.ndarray:
     t = np.arange(int(0.08 * fs)) / fs
     b, a = highpass_coefficients(fs, min(7000.0, 0.4 * fs), 0.7)
     return lfilter(b, a, rng.standard_normal(t.size)) * np.exp(-t / 0.03) * 0.5
+
+
+# ----------------------------------------------------------------------- 6b. lo-fi
+def tape_and_vinyl(music: np.ndarray, fs: int, rng) -> np.ndarray:
+    """Warmth, wow and crackle on the whole bed (section 6b)."""
+    b, a = lowpass_coefficients(fs, min(LOFI_CUTOFF_HZ, 0.4 * fs), 0.707)
+    y = lfilter(b, a, lfilter(b, a, music))
+    t = np.arange(y.size) / fs
+    d = WOW_DEPTH_S * (1.0 - np.cos(2.0 * np.pi * WOW_HZ * t)) / 2.0
+    y = np.interp(t - d, t, y, left=0.0)
+    level = float(np.sqrt(np.mean(y ** 2))) if y.size else 0.0
+    if level == 0.0:
+        return y
+    noise = np.zeros(y.size)
+    pops = rng.random(y.size) < CRACKLE_PER_S / fs
+    noise[pops] = rng.choice((-1.0, 1.0), pops.sum()) * rng.uniform(0.3, 1.0, pops.sum())
+    burst = np.exp(-np.arange(int(0.002 * fs) + 1) / (0.0004 * fs))
+    noise = np.convolve(noise, burst)[: y.size]
+    noise += 0.02 * rng.standard_normal(y.size)                          # hiss
+    hb, ha = highpass_coefficients(fs, min(1500.0, 0.4 * fs), 0.707)
+    noise = lfilter(hb, ha, noise)
+    return y + 0.4 * level * noise
 
 
 # ----------------------------------------------------------------------- 7. volume, ducking
@@ -390,6 +450,16 @@ def backing_track(x: np.ndarray, fs: int, style: str = "pad", chords: str = "loo
         elif style == "epiano":
             for b in (0, 2):
                 _add(parts["chords"], chord.start + b * beat, _struck(triad_notes, 2 * beat, fs))
+        elif style == "lofi":
+            sev = triad_notes[0] + (seventh(key, chord) - triad_notes[0]) % 12
+            chord_notes = sorted(triad_notes + [sev])
+            key_ = (tuple(chord_notes), beat)
+            if key_ not in held:
+                held[key_] = (_mellow(chord_notes, 3 * beat // 2, fs),
+                              0.6 * _mellow(chord_notes, 5 * beat // 2, fs))
+            first, second = held[key_]
+            _add(parts["chords"], chord.start, first)
+            _add(parts["chords"], chord.start + 3 * beat // 2, second)
         else:
             for half in range(8):                         # down on the beat, up between
                 _add(parts["chords"], chord.start + half * beat // 2,
@@ -398,7 +468,16 @@ def backing_track(x: np.ndarray, fs: int, style: str = "pad", chords: str = "loo
             fifth = root + 7 if root + 7 <= 47 else root - 5
             _add(parts["bass"], chord.start, _bass_note(root, 2 * beat - beat // 8, fs))
             _add(parts["bass"], chord.start + 2 * beat, _bass_note(fifth, 2 * beat - beat // 8, fs))
-        if drums:
+        if drums and style == "lofi":
+            for b in range(4):
+                at = chord.start + b * beat
+                if b in (1, 3):
+                    _add(parts["drums"], at, 0.8 * snare_s)
+                _add(parts["drums"], at, 0.6 * hat_s)
+                _add(parts["drums"], at + int(SWING * beat), 0.3 * hat_s)    # swung
+            _add(parts["drums"], chord.start, kick_s)
+            _add(parts["drums"], chord.start + 5 * beat // 2, kick_s)       # the "and" of 3
+        elif drums:
             for b in range(4):
                 at = chord.start + b * beat
                 _add(parts["drums"], at, kick_s if b % 2 == 0 else snare_s)
@@ -406,6 +485,8 @@ def backing_track(x: np.ndarray, fs: int, style: str = "pad", chords: str = "loo
                 _add(parts["drums"], at + beat // 2, 0.5 * hat_s)
 
     music = sum(MIX[name] * part for name, part in parts.items())
+    if style == "lofi":
+        music = tape_and_vinyl(music, fs, rng)
 
     # Volume: a ratio to the voice, both measured as small speakers hear them (section 7).
     active = np.repeat(frames.active, frames.hop)[:total]

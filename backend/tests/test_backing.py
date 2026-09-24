@@ -13,7 +13,7 @@ import pytest
 
 from app.dsp.backing import (
     STYLES, Chord, Key, background_music, backing_track, choose_chord, detect_key,
-    diatonic_triads, kick, pitch_class_histogram, voicing,
+    diatonic_triads, kick, pitch_class_histogram, seventh, voicing,
 )
 from app.dsp.dsp_engine import run_recipe
 from app.dsp.synth import midi_to_hz
@@ -74,6 +74,27 @@ def test_the_chord_that_covers_the_notes_wins(sung, chord):
     w = np.zeros(12)
     w[list(sung)] = 1.0
     assert choose_chord(w, Key(0, "major"), None) == chord
+
+
+@pytest.mark.parametrize("key, pcs, sev", [
+    (Key(0, "major"), (0, 4, 7), 11),                       # Cmaj7
+    (Key(0, "major"), (7, 11, 2), 5),                       # G7
+    (Key(0, "major"), (9, 0, 4), 7),                        # Am7
+    (Key(9, "minor"), (9, 0, 4), 7),                        # Am7 in A minor
+    (Key(9, "minor"), (5, 9, 0), 4),                        # Fmaj7
+])
+def test_lofi_sevenths_are_diatonic(key, pcs, sev):
+    assert seventh(key, Chord(0, 1, pcs[0], pcs)) == sev
+
+
+def test_lofi_tape_rolls_off_the_top():
+    x = hum(TWINKLE)
+    music, _ = backing_track(x, FS, style="lofi", duck_db=0.0)
+    plain, _ = backing_track(x, FS, style="epiano", duck_db=0.0)
+    sp = lambda y: np.abs(np.fft.rfft(y)) ** 2          # noqa: E731
+    f = np.fft.rfftfreq(x.size, 1.0 / FS)
+    top = lambda y: sp(y)[f > 4500.0].sum() / sp(y).sum()   # noqa: E731
+    assert top(music) < 0.5 * top(plain)                     # the tape rolls the top off
 
 
 def test_voicing_sits_the_triad_mid_range_and_the_bass_below():
@@ -171,7 +192,8 @@ def test_music_plays_even_without_a_voice():
 def test_the_card_bakes_through_the_recipe():
     x = hum(A_MINOR_TUNE)
     for params in ({}, {"style": "guitar", "bass": False}, {"style": "organ", "chords": "follow"},
-                   {"style": "epiano", "drums": False, "tempo_bpm": 140}):
+                   {"style": "epiano", "drums": False, "tempo_bpm": 140},
+                   {"style": "lofi", "tempo_bpm": 75}):
         y = run_recipe(x, FS, [{"op": "backing", "params": params}])
         assert y.size == x.size and np.all(np.isfinite(y)) and not np.allclose(y, x)
 
@@ -207,7 +229,7 @@ def test_full_volume_is_about_as_loud_as_the_voice_on_small_speakers():
 
 def test_most_of_the_music_is_where_small_speakers_play():
     x = hum(TWINKLE)
-    for style in ("pad", "epiano", "organ"):
+    for style in ("pad", "epiano", "organ", "lofi"):
         music, _ = backing_track(x, FS, style=style)
         sp = np.abs(np.fft.rfft(music)) ** 2
         f = np.fft.rfftfreq(music.size, 1.0 / FS)
