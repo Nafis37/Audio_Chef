@@ -96,7 +96,7 @@ function SourceTabsImpl({
               <button
                 type="button"
                 onClick={() => onSave(source.id)}
-                title={`Save ${source.filename} with its recipe applied (WAV)`}
+                title={`Save ${source.filename} with its recipe applied`}
                 className="rounded p-1 text-[var(--chef-muted)] transition hover:bg-[var(--chef-hover)] hover:text-[var(--chef-accent-strong)]"
               >
                 <Download className="size-3" />

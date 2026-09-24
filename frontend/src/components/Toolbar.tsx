@@ -1,5 +1,5 @@
 /**
- * The top bar: file name, Auto-Bake toggle, manual Bake, Export WAV, and status.
+ * The top bar: file name, Auto-Bake toggle, manual Bake, Export audio, and status.
  *
  * Auto-Bake is the CyberChef behaviour -- every recipe or slider change immediately
  * re-runs the pipeline.  It can be switched off for long files, where each bake costs
@@ -96,10 +96,10 @@ function ToolbarImpl({
           type="button"
           onClick={onExport}
           disabled={!canExport}
-          title="Save the baked audio as a WAV file"
+          title="Save the baked audio"
           className="flex items-center gap-1.5 rounded-md border border-[var(--chef-border)] px-3 py-1.5 text-xs font-medium transition hover:border-[var(--chef-accent-strong)] disabled:opacity-30"
         >
-          <Download className="size-3.5" /> Export WAV
+          <Download className="size-3.5" /> Export audio
         </button>
       </div>
     </header>

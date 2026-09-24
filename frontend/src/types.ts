@@ -55,8 +55,6 @@ export interface OperationDef {
   how: string
   /** What a listener should hear and see change. */
   listen_for: string
-  /** One-click settings: name -> the params it moves (display units). */
-  quick?: Record<string, Record<string, ParamValue>>
   /** Served so old recipes still render, but not offered in the palette. */
   hidden?: boolean
   params: ParamDef[]

@@ -54,7 +54,6 @@ import { WaveformViewer, type RegionSpec, type WaveformHandle } from './componen
 import { sourceColor } from './colors'
 import { filterMarkers } from './filterMarkers'
 import { forgetPeaks } from './peaks'
-import type { Preset } from './presets'
 import { regionFor } from './regions'
 import { SourcesProvider, type SourceOption } from './sources'
 import {
@@ -98,7 +97,13 @@ const RECIPE_MIN = 260
 const RECIPE_MAX = 760
 /** Column 3 never gets squeezed below this -- a narrower waveform is unreadable. */
 const LISTEN_MIN = 360
-const WIDTH_KEYS = { palette: 'chef.paletteWidth', recipe: 'chef.recipeWidth' } as const
+const WIDTH_KEYS = {
+  palette: 'chef.paletteWidth',
+  recipe: 'chef.recipeWidth',
+  // An Arrange tab keeps its own pair, narrow by default: the timeline wants column 3.
+  arrangePalette: 'chef.arrangePaletteWidth',
+  arrangeRecipe: 'chef.arrangeRecipeWidth',
+} as const
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value))
@@ -160,11 +165,17 @@ export default function App() {
   const [recipeWidth, setRecipeWidth] = useState(() =>
     storedWidth(WIDTH_KEYS.recipe, RECIPE_DEFAULT, RECIPE_MIN, RECIPE_MAX),
   )
+  const [arrangePaletteWidth, setArrangePaletteWidth] = useState(() =>
+    storedWidth(WIDTH_KEYS.arrangePalette, PALETTE_MIN, PALETTE_MIN, PALETTE_MAX),
+  )
+  const [arrangeRecipeWidth, setArrangeRecipeWidth] = useState(() =>
+    storedWidth(WIDTH_KEYS.arrangeRecipe, RECIPE_MIN, RECIPE_MIN, RECIPE_MAX),
+  )
   const [autoBake, setAutoBake] = useState(true)
   const [busy, setBusy] = useState(false)
   const [showBusy, setShowBusy] = useState(false)
   const [dropping, setDropping] = useState(false)
-  const [status, setStatus] = useState('Load a WAV file to start')
+  const [status, setStatus] = useState('Load an audio file to start')
   const [error, setError] = useState<string | null>(null)
 
   // Only one bake may be in flight; a newer one aborts the older so a slow response
@@ -186,6 +197,10 @@ export default function App() {
   // keeps both handlers stable, so dragging one splitter does not re-render the other.
   const paletteWidthRef = useRef(paletteWidth)
   const recipeWidthRef = useRef(recipeWidth)
+  const arrangePaletteRef = useRef(arrangePaletteWidth)
+  const arrangeRecipeRef = useRef(arrangeRecipeWidth)
+  // Which pair the splitters are editing: the Arrange pair while an Arrange tab is open.
+  const arrangingRef = useRef(false)
 
   // --- Load the tool catalogue from the backend -------------------------------------
   useEffect(() => {
@@ -510,28 +525,39 @@ export default function App() {
   // --- Column resizing --------------------------------------------------------------
   // Both clamps live here rather than in the splitter: only App knows the other column's
   // width, and the pair has to leave LISTEN_MIN for column 3 between them.
+  // An Arrange tab edits its own pair of widths, a file tab the other.
   const resizePalette = useCallback((next: number) => {
-    const room = window.innerWidth - recipeWidthRef.current - LISTEN_MIN
+    const arranging = arrangingRef.current
+    const recipe = arranging ? arrangeRecipeRef.current : recipeWidthRef.current
+    const room = window.innerWidth - recipe - LISTEN_MIN
     // Math.max keeps the minimum winning over the room budget: on a very narrow window
     // the columns overflow rather than collapsing into unusable slivers.
-    setPaletteWidth(clamp(next, PALETTE_MIN, Math.max(PALETTE_MIN, Math.min(PALETTE_MAX, room))))
+    const width = clamp(next, PALETTE_MIN, Math.max(PALETTE_MIN, Math.min(PALETTE_MAX, room)))
+    ;(arranging ? setArrangePaletteWidth : setPaletteWidth)(width)
   }, [])
 
   const resizeRecipe = useCallback((next: number) => {
-    const room = window.innerWidth - paletteWidthRef.current - LISTEN_MIN
-    setRecipeWidth(clamp(next, RECIPE_MIN, Math.max(RECIPE_MIN, Math.min(RECIPE_MAX, room))))
+    const arranging = arrangingRef.current
+    const palette = arranging ? arrangePaletteRef.current : paletteWidthRef.current
+    const room = window.innerWidth - palette - LISTEN_MIN
+    const width = clamp(next, RECIPE_MIN, Math.max(RECIPE_MIN, Math.min(RECIPE_MAX, room)))
+    ;(arranging ? setArrangeRecipeWidth : setRecipeWidth)(width)
   }, [])
 
   useEffect(() => {
     paletteWidthRef.current = paletteWidth
     recipeWidthRef.current = recipeWidth
+    arrangePaletteRef.current = arrangePaletteWidth
+    arrangeRecipeRef.current = arrangeRecipeWidth
     try {
       window.localStorage.setItem(WIDTH_KEYS.palette, String(paletteWidth))
       window.localStorage.setItem(WIDTH_KEYS.recipe, String(recipeWidth))
+      window.localStorage.setItem(WIDTH_KEYS.arrangePalette, String(arrangePaletteWidth))
+      window.localStorage.setItem(WIDTH_KEYS.arrangeRecipe, String(arrangeRecipeWidth))
     } catch {
       // Private mode / storage disabled: the widths just do not survive a reload.
     }
-  }, [paletteWidth, recipeWidth])
+  }, [paletteWidth, recipeWidth, arrangePaletteWidth, arrangeRecipeWidth])
 
   // --- Recipe mutations -------------------------------------------------------------
   // All of these act on the chain currently open in column 2.
@@ -557,27 +583,8 @@ export default function App() {
     setActiveUid(editing, null)
   }, [editing, editChain, setActiveUid])
 
-  // A preset REPLACES the open chain.  Each step starts as newStep() -- every param at its
-  // schema default -- and the preset only overrides the ones it names, so a preset can
-  // never hold a stale schema.  An op the catalogue does not have is skipped.
-  const applyPreset = useCallback(
-    (preset: Preset) => {
-      const byId = new Map(operations.map((op) => [op.id, op]))
-      const steps = preset.steps.flatMap(({ op: id, params }) => {
-        const op = byId.get(id)
-        if (!op) return []
-        const step = newStep(op)
-        return [{ ...step, params: { ...step.params, ...params } }]
-      })
-      editChain(editing, () => steps)
-      // Same rule as addOperation: a step with a region is linked straight away.
-      setActiveUid(editing, steps.find((step) => regionFor(step.op, step.params))?.uid ?? null)
-    },
-    [operations, editing, editChain, setActiveUid],
-  )
-
   // Signal Doctor's prescription is APPENDED to the open chain (never replaces it), as
-  // ordinary cards built the same way a preset builds them.
+  // ordinary cards: every param at its schema default, then the prescribed values.
   const appendSteps = useCallback(
     (wire: WireStep[]) => {
       const byId = new Map(operations.map((op) => [op.id, op]))
@@ -814,6 +821,11 @@ export default function App() {
     : null
 
   const isArrange = editingSource?.kind === 'arrange'
+  useEffect(() => {
+    arrangingRef.current = isArrange
+  }, [isArrange])
+  const shownPalette = isArrange ? arrangePaletteWidth : paletteWidth
+  const shownRecipe = isArrange ? arrangeRecipeWidth : recipeWidth
   const hasAnySteps = recipe.length > 0 || (isArrange && editingSource.clips.length > 0)
   const fileTabs = useMemo(() => sources.filter((source) => source.kind === 'file'), [sources])
   const onClipsChange = useCallback(
@@ -864,13 +876,13 @@ export default function App() {
         <main
           className="grid min-h-0 flex-1"
           style={{
-            gridTemplateColumns: `${paletteWidth}px auto ${recipeWidth}px auto 1fr`,
+            gridTemplateColumns: `${shownPalette}px auto ${shownRecipe}px auto 1fr`,
           }}
         >
           <OperationsPalette operations={operations} onAdd={handleAdd} />
 
           <ColumnSplitter
-            width={paletteWidth}
+            width={shownPalette}
             onResize={resizePalette}
             label="Operations column width"
           />
@@ -888,16 +900,14 @@ export default function App() {
               tabColor={editingSource?.color ?? 'transparent'}
               onSelect={selectStep}
               onParamChange={updateParam}
-              onParamsChange={updateParams}
               onToggleBypass={toggleBypass}
               onRemove={removeStep}
               onClear={handleClear}
-              onPreset={applyPreset}
             />
           </SourcesProvider>
 
           <ColumnSplitter
-            width={recipeWidth}
+            width={shownRecipe}
             onResize={resizeRecipe}
             label="Recipe column width"
           />

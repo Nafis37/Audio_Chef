@@ -69,13 +69,15 @@ export function toWireClips(clips: ArrangeClip[]): WireClip[] {
 
 export function toWireTracks(tracks: ArrangeTrack[]): WireTrack[] {
   const curve = (points: EnvPoint[]) => points.map((p): [number, number] => [p.t, p.v])
+  // Pan is no longer offered in the UI: every track plays centred, including projects
+  // saved while it was, so nothing hidden changes the sound.
   return tracks.map((track) => ({
     volume_db: track.volumeDb,
-    pan: track.pan,
+    pan: 0,
     mute: track.mute,
     solo: track.solo,
     volume_env: curve(track.volumeEnv),
-    pan_env: curve(track.panEnv),
+    pan_env: [],
   }))
 }
 

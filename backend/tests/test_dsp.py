@@ -418,14 +418,6 @@ def test_schema_extras_point_at_real_params():
             for other, values in (p.get("show_when") or {}).items():
                 assert other in params, (op["id"], p["name"])
                 assert set(values) <= set(params[other]["options"]), (op["id"], p["name"])
-        for name, settings in (op.get("quick") or {}).items():
-            for key, value in settings.items():
-                assert key in params, (op["id"], name, key)
-                spec = params[key]
-                if spec["type"] == "float":
-                    assert spec["min"] <= value <= spec["max"], (op["id"], name, key)
-                elif spec["type"] == "enum":
-                    assert value in spec["options"], (op["id"], name, key)
 
 
 def test_old_echo_reverb_recipes_still_bake():

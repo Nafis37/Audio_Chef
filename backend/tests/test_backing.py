@@ -222,11 +222,9 @@ def test_the_voice_is_untouched_at_any_volume():
                                    atol=1e-12)
 
 
-def test_volume_is_the_first_control_in_percent_with_quick_buttons():
+def test_volume_is_the_first_control_in_percent():
     from app.dsp.dsp_engine import OPERATIONS
     card = next(op for op in OPERATIONS if op["id"] == "backing")
     volume = card["params"][0]
     assert volume["name"] == "volume" and volume["unit"] == "%"
     assert volume["min"] == 0.0 and volume["max"] == 200.0 and volume["default"] == 50
-    assert card["quick"]["Quieter"] == {"volume": 25}
-    assert card["quick"]["Louder"] == {"volume": 100}

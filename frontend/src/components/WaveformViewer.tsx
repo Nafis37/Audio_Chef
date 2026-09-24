@@ -374,7 +374,7 @@ function WaveformViewerImpl({
           {undecodable && (
             <p className="absolute inset-0 flex items-center justify-center px-6 text-center text-xs leading-relaxed text-[var(--chef-muted)]">
               This browser can’t preview this format — processing still works, and the Output
-              below is a WAV you can play and export.
+              below is audio you can play and export.
             </p>
           )}
           {busy && (

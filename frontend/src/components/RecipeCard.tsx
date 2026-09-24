@@ -9,7 +9,6 @@
  * What a card shows, top to bottom -- all of it generated from the backend schema:
  *
  *   header       name, link / On-Off / remove
- *   quick row    one-click settings ("Subtle", "Hall", "Fast talk"...) from `op.quick`
  *   main knobs   the params a first-time user needs
  *   Advanced     everything marked `advanced`, folded away
  *
@@ -54,8 +53,6 @@ interface Props {
   active: boolean
   onSelect: (uid: string) => void
   onParamChange: (uid: string, name: string, value: ParamValue) => void
-  /** Several params in one edit -- a quick-setting chip. */
-  onParamsChange: (uid: string, values: Record<string, ParamValue>) => void
   onToggleBypass: (uid: string) => void
   onRemove: (uid: string) => void
 }
@@ -64,8 +61,8 @@ interface Props {
  * Renders `value` immediately, forwards it upward on a leading+trailing throttle.
  *
  * `sent` remembers the last value this control pushed, so when the parent echoes it back
- * we know it is our own value and leave the local one alone; anything else (a preset, a
- * Clear, a reordered card) is an outside edit and does resync the control.
+ * we know it is our own value and leave the local one alone; anything else (a Signal
+ * Doctor fix, a Clear, a reordered card) is an outside edit and does resync the control.
  */
 function useLiveValue(
   value: ParamValue,
@@ -345,7 +342,6 @@ function RecipeCardImpl({
   active,
   onSelect,
   onParamChange,
-  onParamsChange,
   onToggleBypass,
   onRemove,
 }: Props) {
@@ -362,14 +358,6 @@ function RecipeCardImpl({
   const shown = definition.params.filter((param) => isParamShown(param, values))
   const main = shown.filter((param) => !param.advanced)
   const advanced = shown.filter((param) => param.advanced)
-  const quick = Object.entries(definition.quick ?? {})
-  // A chip is lit when every value it sets is what the card currently holds.
-  const isQuickActive = (settings: Record<string, ParamValue>) =>
-    Object.entries(settings).every(([name, value]) =>
-      typeof value === 'number'
-        ? Math.abs(Number(values[name]) - value) < 1e-6
-        : values[name] === value,
-    )
 
   // One stable callback for the whole card instead of a fresh closure per parameter.
   const handleParam = useCallback(
@@ -452,25 +440,6 @@ function RecipeCardImpl({
           <X className="size-4" />
         </button>
       </header>
-
-      {quick.length > 0 && (
-        <div className="flex flex-wrap gap-1 px-3 pt-2">
-          {quick.map(([name, settings]) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => onParamsChange(step.uid, settings)}
-              className={`rounded-full border px-2 py-0.5 text-[11px] transition ${
-                isQuickActive(settings)
-                  ? 'border-[var(--chef-accent-strong)] bg-[var(--chef-accent)]/40 text-[var(--chef-accent-strong)]'
-                  : 'border-[var(--chef-border)] text-[var(--chef-muted)] hover:border-[var(--chef-accent-strong)] hover:text-[var(--chef-text)]'
-              }`}
-            >
-              {name}
-            </button>
-          ))}
-        </div>
-      )}
 
       <div className="space-y-0.5 px-3 py-2">
         {main.map((param) => (

@@ -18,7 +18,6 @@ import { Droppable, Draggable } from '@hello-pangea/dnd'
 import { Trash2 } from 'lucide-react'
 import { memo, useMemo } from 'react'
 import { RecipeCard } from './RecipeCard'
-import { PRESETS, type Preset } from '../presets'
 import type { OperationDef, ParamValue, RecipeStep } from '../types'
 
 interface Props {
@@ -34,12 +33,10 @@ interface Props {
   tabColor: string
   onSelect: (uid: string) => void
   onParamChange: (uid: string, name: string, value: ParamValue) => void
-  onParamsChange: (uid: string, values: Record<string, ParamValue>) => void
   onToggleBypass: (uid: string) => void
   onRemove: (uid: string) => void
   onClear: () => void
   /** Replaces the open chain with a starter recipe. */
-  onPreset: (preset: Preset) => void
 }
 
 function RecipeImpl({
@@ -52,11 +49,9 @@ function RecipeImpl({
   tabColor,
   onSelect,
   onParamChange,
-  onParamsChange,
   onToggleBypass,
   onRemove,
   onClear,
-  onPreset,
 }: Props) {
   const byId = useMemo(() => new Map(operations.map((op) => [op.id, op])), [operations])
   const empty = recipe.length === 0
@@ -83,27 +78,6 @@ function RecipeImpl({
           )}
         </h2>
         <div className="flex items-center gap-1">
-          {/* A select that always shows its placeholder: picking an entry is an action,
-              not a state, so the value snaps back and the same preset can be re-applied. */}
-          <select
-            value=""
-            aria-label="Load a preset recipe"
-            disabled={operations.length === 0}
-            onChange={(event) => {
-              const preset = PRESETS.find((p) => p.id === event.target.value)
-              if (preset) onPreset(preset)
-            }}
-            className="rounded border border-[var(--chef-border)] bg-[var(--chef-inset)] px-1.5 py-1 text-xs text-[var(--chef-muted)] transition hover:text-[var(--chef-text)] disabled:opacity-30"
-          >
-            <option value="" disabled>
-              Presets…
-            </option>
-            {PRESETS.map((preset) => (
-              <option key={preset.id} value={preset.id} title={preset.description}>
-                {preset.label}
-              </option>
-            ))}
-          </select>
           <button
             type="button"
             onClick={onClear}
@@ -148,7 +122,6 @@ function RecipeImpl({
                         active={step.uid === activeUid}
                         onSelect={onSelect}
                         onParamChange={onParamChange}
-                        onParamsChange={onParamsChange}
                         onToggleBypass={onToggleBypass}
                         onRemove={onRemove}
                       />
@@ -173,9 +146,6 @@ function RecipeImpl({
               <>
                 <p className="text-sm font-medium text-[var(--chef-accent-strong)]">
                   Pick an operation on the left
-                </p>
-                <p className="mt-1 text-xs text-[var(--chef-muted)]">
-                  Click it or drag it here. Steps run top to bottom, on this file only.
                 </p>
               </>
             ) : (

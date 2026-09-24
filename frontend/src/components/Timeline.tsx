@@ -10,11 +10,11 @@
  *   - S, or the Split button                                -> cut the selected block at the cursor
  *   - Delete / Backspace                                    -> remove the selected block
  *
- * Each track has a header: mute (M), solo (S), volume and pan, and an automation lane
- * (the curve icon) where volume or pan is drawn over time -- click to add a point, drag
+ * Each track has a header: mute (M), solo (S), volume, and an automation lane (the curve
+ * icon) where volume is drawn over time -- click to add a point, drag
  * it, double-click it to remove it.  A curve with points overrides its knob.  Two blocks
  * that overlap on ONE track crossfade; on different tracks they play together.  The mix
- * is stereo (backend dsp/arrange.py).
+ * is rendered by the backend (dsp/arrange.py); every track plays centred.
  *
  * Moves and trims snap to the edges of other blocks (within SNAP_PX) and otherwise to a
  * 0.05 s grid.  A drag is previewed locally and committed on release, so one drag is one
@@ -40,10 +40,10 @@ interface Props {
   onTracksChange: (tracks: ArrangeTrack[]) => void
 }
 
-const LANE_H = 64
+const LANE_H = 84
 const ENV_H = 72
-const HEADER_W = 176
-const RULER_H = 24
+const HEADER_W = 196
+const RULER_H = 28
 const EDGE_PX = 7          // grab zone for trimming, each side
 const SNAP_PX = 8
 const GRID_S = 0.05
@@ -59,12 +59,11 @@ const DEFAULT_TRACK: ArrangeTrack = {
   panEnv: [],
 }
 
-type EnvKind = 'volume' | 'pan'
+type EnvKind = 'volume'
 
 /** Value range of each automation lane, top to bottom. */
 const ENV_RANGE: Record<EnvKind, { top: number; bottom: number }> = {
   volume: { top: 12, bottom: -36 },     // dB
-  pan: { top: -1, bottom: 1 },          // left at the top, right at the bottom
 }
 
 type Mode = 'move' | 'left' | 'right' | 'fadeIn' | 'fadeOut'
@@ -97,8 +96,8 @@ function spanOf(clip: ArrangeClip, duration: number): number {
   return Math.max(0, end - clip.clipStart)
 }
 
-function envKey(kind: EnvKind): 'volumeEnv' | 'panEnv' {
-  return kind === 'volume' ? 'volumeEnv' : 'panEnv'
+function envKey(_kind: EnvKind): 'volumeEnv' {
+  return 'volumeEnv'
 }
 
 function yOf(kind: EnvKind, value: number): number {
@@ -111,12 +110,7 @@ function valueAt(kind: EnvKind, y: number): number {
   const { top, bottom } = ENV_RANGE[kind]
   const f = Math.min(1, Math.max(0, (y - 6) / (ENV_H - 12)))
   const value = top + f * (bottom - top)
-  return kind === 'volume' ? Math.round(value * 2) / 2 : Math.round(value * 100) / 100
-}
-
-function formatPan(pan: number): string {
-  if (Math.abs(pan) < 0.005) return 'C'
-  return `${pan < 0 ? 'L' : 'R'}${Math.round(Math.abs(pan) * 100)}`
+  return Math.round(value * 2) / 2             // half-dB steps
 }
 
 function formatDb(db: number): string {
@@ -411,7 +405,7 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
     setEnvOpen((open) => {
       const next = { ...open }
       if (next[k]) delete next[k]
-      else next[k] = trackAt(k).panEnv.length && !trackAt(k).volumeEnv.length ? 'pan' : 'volume'
+      else next[k] = 'volume'
       return next
     })
 
@@ -476,18 +470,17 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
       onKeyDown={onKeyDown}
       className="rounded-lg border border-[var(--chef-border)] bg-[var(--chef-panel)] outline-none"
     >
-      <header className="flex flex-wrap items-center gap-2 border-b border-[var(--chef-border)] px-4 py-2.5">
+      <header className="flex flex-wrap items-center gap-3 border-b border-[var(--chef-border)] px-4 py-3">
         <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--chef-muted)]">
           Timeline
         </h2>
         <span className="font-mono text-xs text-[var(--chef-muted)]">{formatTime(contentEnd, 2)}</span>
-        <span className="text-[11px] text-[var(--chef-muted)]">· stereo mix</span>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-1 rounded-md border border-[var(--chef-border)] p-0.5">
           <button
             type="button"
             onClick={() => setZoom((z) => Math.max(1, z / 1.5))}
             disabled={zoom <= 1}
-            className="rounded p-1 text-[var(--chef-muted)] hover:bg-[var(--chef-hover)] disabled:opacity-30"
+            className="rounded p-1.5 text-[var(--chef-muted)] hover:bg-[var(--chef-hover)] disabled:opacity-30"
             title="Zoom out"
           >
             <Minus className="size-3.5" />
@@ -495,7 +488,7 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
           <button
             type="button"
             onClick={() => setZoom((z) => Math.min(40, z * 1.5))}
-            className="rounded p-1 text-[var(--chef-muted)] hover:bg-[var(--chef-hover)]"
+            className="rounded p-1.5 text-[var(--chef-muted)] hover:bg-[var(--chef-hover)]"
             title="Zoom in"
           >
             <Plus className="size-3.5" />
@@ -504,9 +497,12 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
       </header>
 
       {/* The file strip: drag a chip onto a track. */}
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--chef-border)] px-4 py-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--chef-border)] px-4 py-3">
+        <span className="mr-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--chef-muted)]">
+          Files
+        </span>
         {files.length === 0 ? (
-          <span className="text-[11px] text-[var(--chef-muted)]">
+          <span className="text-xs text-[var(--chef-muted)]">
             Open some audio files first — they appear here to drag onto the tracks.
           </span>
         ) : (
@@ -519,12 +515,12 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
                 event.dataTransfer.effectAllowed = 'copy'
               }}
               title={`Drag ${file.filename} onto a track`}
-              className="flex cursor-grab items-center gap-1.5 rounded-md border bg-[var(--chef-surface)] px-2 py-1 text-[11px] active:cursor-grabbing"
+              className="flex cursor-grab items-center gap-2 rounded-md border bg-[var(--chef-surface)] px-2.5 py-1.5 text-xs shadow-sm transition hover:shadow active:cursor-grabbing"
               style={{ borderColor: file.color }}
             >
-              <span className="size-2 rounded-full" style={{ backgroundColor: file.color }} />
-              <span className="max-w-[140px] truncate">{file.filename}</span>
-              <span className="font-mono text-[10px] text-[var(--chef-muted)]">
+              <span className="size-2.5 rounded-full" style={{ backgroundColor: file.color }} />
+              <span className="max-w-[160px] truncate">{file.filename}</span>
+              <span className="font-mono text-[11px] text-[var(--chef-muted)]">
                 {formatTime(file.duration, 1)}
               </span>
             </span>
@@ -548,7 +544,6 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
               envKind={envOpen[k] ?? null}
               onPatch={(patch) => updateTrack(k, patch)}
               onToggleEnv={() => toggleEnv(k)}
-              onEnvKind={(kind) => setEnvOpen((open) => ({ ...open, [k]: kind }))}
             />
           ))}
         </div>
@@ -567,7 +562,7 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
               {ticks.map((t) => (
                 <span
                   key={t}
-                  className="absolute top-0 h-full border-l border-[var(--chef-border)] pl-1 font-mono text-[11px] leading-[24px] text-[var(--chef-text)]"
+                  className="absolute top-0 h-full border-l border-[var(--chef-border)] pl-1.5 font-mono text-[11px] leading-[28px] text-[var(--chef-text)]"
                   style={{ left: t * pps }}
                 >
                   {formatTime(t, spacing.decimals)}
@@ -634,7 +629,7 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
                     width={innerWidth}
                     pps={pps}
                     points={envPoints(k, kind)}
-                    knob={kind === 'volume' ? trackAt(k).volumeDb : trackAt(k).pan}
+                    knob={trackAt(k).volumeDb}
                     onPointerDown={(event) => onEnvDown(event, k, kind)}
                     onPointerMove={onEnvMove}
                     onPointerUp={onEnvUp}
@@ -655,26 +650,31 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
       </div>
 
       {/* The selected block's controls. */}
-      <footer className="flex flex-wrap items-center gap-3 border-t border-[var(--chef-border)] px-4 py-2 text-xs">
-        {selectedClip ? (
-          <>
-            <span className="max-w-[160px] truncate font-medium">
-              {byId.get(selectedClip.source)?.filename}
+      {selectedClip && (
+        <footer className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-[var(--chef-border)] bg-[var(--chef-inset)]/40 px-4 py-2.5 text-xs">
+          <span className="flex max-w-[200px] items-center gap-2 truncate font-medium">
+            <span
+              className="size-2.5 shrink-0 rounded-full"
+              style={{ backgroundColor: byId.get(selectedClip.source)?.color }}
+            />
+            {byId.get(selectedClip.source)?.filename}
+          </span>
+          <label className="flex items-center gap-2 text-[var(--chef-muted)]">
+            Volume
+            <input
+              type="range"
+              min={-24}
+              max={12}
+              step={0.5}
+              value={selectedClip.gainDb}
+              onChange={(event) => patchSelected({ gainDb: Number(event.target.value) })}
+              className="w-40"
+            />
+            <span className="w-16 font-mono text-[var(--chef-text)]">
+              {formatDb(selectedClip.gainDb)}
             </span>
-            <label className="flex items-center gap-2 text-[var(--chef-muted)]">
-              Volume
-              <input
-                type="range"
-                min={-24}
-                max={12}
-                step={0.5}
-                value={selectedClip.gainDb}
-                onChange={(event) => patchSelected({ gainDb: Number(event.target.value) })}
-              />
-              <span className="w-14 font-mono text-[var(--chef-text)]">
-                {formatDb(selectedClip.gainDb)}
-              </span>
-            </label>
+          </label>
+          <div className="flex items-center gap-3 border-l border-[var(--chef-border)] pl-5">
             {(['fadeIn', 'fadeOut'] as const).map((key) => (
               <label key={key} className="flex items-center gap-1.5 text-[var(--chef-muted)]">
                 {key === 'fadeIn' ? 'Fade in' : 'Fade out'}
@@ -689,17 +689,19 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
                     const value = Math.min(Math.max(0, Number(event.target.value) || 0), selectedLen - other)
                     patchSelected({ [key]: Math.round(value * 100) / 100 })
                   }}
-                  className="w-16 rounded border border-[var(--chef-border)] bg-[var(--chef-surface)] px-1.5 py-0.5 font-mono text-[var(--chef-text)]"
+                  className="w-16 rounded border border-[var(--chef-border)] bg-[var(--chef-surface)] px-1.5 py-1 font-mono text-[var(--chef-text)]"
                 />
                 s
               </label>
             ))}
+          </div>
+          <div className="ml-auto flex items-center gap-1 border-l border-[var(--chef-border)] pl-5">
             <button
               type="button"
               onClick={splitSelected}
               disabled={cursor === null}
               title="Split at the cursor (S)"
-              className="flex items-center gap-1 rounded px-2 py-1 hover:bg-[var(--chef-hover)] disabled:opacity-30"
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 hover:bg-[var(--chef-hover)] disabled:opacity-30"
             >
               <Scissors className="size-3.5" /> Split
             </button>
@@ -707,19 +709,13 @@ function TimelineImpl({ clips, tracks, files, onChange, onTracksChange }: Props)
               type="button"
               onClick={deleteSelected}
               title="Remove the block (Delete)"
-              className="flex items-center gap-1 rounded px-2 py-1 text-rose-600 hover:bg-[var(--chef-hover)]"
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-rose-600 hover:bg-[var(--chef-hover)]"
             >
               <Trash2 className="size-3.5" /> Remove
             </button>
-          </>
-        ) : (
-          <span className="text-[var(--chef-muted)]">
-            Drag a file onto a track. Drag blocks to move them, their edges to trim, the round
-            corner handles to fade; overlap two blocks on one track to crossfade. Alt-drag to
-            copy. Click to place the cursor, then S to split.
-          </span>
-        )}
-      </footer>
+          </div>
+        </footer>
+      )}
     </section>
   )
 }
@@ -732,26 +728,26 @@ interface TrackHeaderProps {
   envKind: EnvKind | null
   onPatch: (patch: Partial<ArrangeTrack>) => void
   onToggleEnv: () => void
-  onEnvKind: (kind: EnvKind) => void
 }
 
-function TrackHeader({ index, track, audible, envKind, onPatch, onToggleEnv, onEnvKind }: TrackHeaderProps) {
+function TrackHeader({ index, track, audible, envKind, onPatch, onToggleEnv }: TrackHeaderProps) {
   const volumeAuto = track.volumeEnv.length > 0
-  const panAuto = track.panEnv.length > 0
   const toggle = (on: boolean, color: string) =>
-    `w-5 rounded text-[10px] font-bold leading-4 ${
-      on ? `${color} text-white` : 'bg-[var(--chef-inset)] text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
+    `flex size-[22px] items-center justify-center rounded-md text-[11px] font-bold transition ${
+      on
+        ? `${color} text-white`
+        : 'bg-[var(--chef-inset)] text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
     }`
   return (
     <>
       <div
-        className={`flex flex-col justify-center gap-1 border-b border-[var(--chef-border)] px-2 text-[11px] ${
+        className={`flex flex-col justify-center gap-2.5 border-b border-[var(--chef-border)] px-3 text-xs ${
           index % 2 ? 'bg-[var(--chef-inset)]/40' : ''
         } ${audible ? '' : 'opacity-60'}`}
         style={{ height: LANE_H }}
       >
-        <div className="flex items-center gap-1">
-          <span className="mr-auto truncate font-medium">Track {index + 1}</span>
+        <div className="flex items-center gap-1.5">
+          <span className="mr-auto truncate font-semibold">Track {index + 1}</span>
           <button
             type="button"
             onClick={() => onPatch({ mute: !track.mute })}
@@ -771,18 +767,14 @@ function TrackHeader({ index, track, audible, envKind, onPatch, onToggleEnv, onE
           <button
             type="button"
             onClick={onToggleEnv}
-            className={`rounded p-0.5 ${
-              envKind || volumeAuto || panAuto
-                ? 'text-[var(--chef-accent-strong)]'
-                : 'text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
-            }`}
-            title="Automation: draw volume or pan over time"
+            className={toggle(Boolean(envKind) || volumeAuto, 'bg-[var(--chef-accent-strong)]')}
+            title="Automation: draw the volume over time"
           >
             <Spline className="size-3.5" />
           </button>
         </div>
-        <label className="flex items-center gap-1 text-[var(--chef-muted)]" title="Volume (double-click: 0 dB)">
-          <span className="w-6">Vol</span>
+        <label className="flex items-center gap-2 text-[var(--chef-muted)]" title="Volume (double-click: 0 dB)">
+          <span>Vol</span>
           <input
             type="range"
             min={-36}
@@ -792,58 +784,25 @@ function TrackHeader({ index, track, audible, envKind, onPatch, onToggleEnv, onE
             disabled={volumeAuto}
             onChange={(event) => onPatch({ volumeDb: Number(event.target.value) })}
             onDoubleClick={() => onPatch({ volumeDb: 0 })}
-            className="h-3 min-w-0 flex-1 disabled:opacity-40"
+            className="min-w-0 flex-1 disabled:opacity-40"
           />
-          <span className="w-11 text-right font-mono text-[10px] text-[var(--chef-text)]">
+          <span className="w-12 text-right font-mono text-[11px] text-[var(--chef-text)]">
             {volumeAuto ? 'auto' : `${track.volumeDb > 0 ? '+' : ''}${track.volumeDb.toFixed(1)}`}
-          </span>
-        </label>
-        <label className="flex items-center gap-1 text-[var(--chef-muted)]" title="Pan (double-click: centre)">
-          <span className="w-6">Pan</span>
-          <input
-            type="range"
-            min={-1}
-            max={1}
-            step={0.05}
-            value={track.pan}
-            disabled={panAuto}
-            onChange={(event) => onPatch({ pan: Number(event.target.value) })}
-            onDoubleClick={() => onPatch({ pan: 0 })}
-            className="h-3 min-w-0 flex-1 disabled:opacity-40"
-          />
-          <span className="w-11 text-right font-mono text-[10px] text-[var(--chef-text)]">
-            {panAuto ? 'auto' : formatPan(track.pan)}
           </span>
         </label>
       </div>
       {envKind && (
         <div
-          className="flex flex-col justify-center gap-1.5 border-b border-[var(--chef-border)] bg-[var(--chef-inset)] px-2 text-[11px]"
+          className="flex flex-col justify-center gap-2 border-b border-[var(--chef-border)] bg-[var(--chef-inset)] px-3 text-xs"
           style={{ height: ENV_H }}
         >
-          <div className="flex rounded-md border border-[var(--chef-border)] bg-[var(--chef-surface)] p-0.5">
-            {(['volume', 'pan'] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => onEnvKind(kind)}
-                className={`flex-1 rounded px-1.5 py-0.5 ${
-                  envKind === kind
-                    ? 'bg-[var(--chef-accent-strong)] font-medium text-white'
-                    : 'text-[var(--chef-muted)] hover:text-[var(--chef-text)]'
-                }`}
-              >
-                {kind === 'volume' ? 'Volume' : 'Pan'}
-                {(kind === 'volume' ? volumeAuto : panAuto) ? ' •' : ''}
-              </button>
-            ))}
-          </div>
+          <span className="font-medium text-[var(--chef-muted)]">Volume curve</span>
           <button
             type="button"
-            disabled={!(envKind === 'volume' ? volumeAuto : panAuto)}
+            disabled={!volumeAuto}
             onClick={() => onPatch({ [envKey(envKind)]: [] })}
-            className="self-start rounded px-1.5 py-0.5 text-[var(--chef-muted)] hover:bg-[var(--chef-hover)] hover:text-[var(--chef-text)] disabled:opacity-30"
-            title="Remove every point: the knob takes over again"
+            className="self-start rounded-md px-2 py-1 text-[var(--chef-muted)] hover:bg-[var(--chef-hover)] hover:text-[var(--chef-text)] disabled:opacity-30"
+            title="Remove every point: the Vol slider takes over again"
           >
             Clear curve
           </button>
@@ -872,7 +831,7 @@ function EnvelopeLane({
   kind, top, width, pps, points, knob, onPointerDown, onPointerMove, onPointerUp, onRemove,
 }: EnvelopeLaneProps) {
   const { top: topValue, bottom: bottomValue } = ENV_RANGE[kind]
-  const label = (v: number) => (kind === 'volume' ? formatDb(v) : formatPan(v))
+  const label = formatDb
   const line = points.length
     ? [
         `M0,${yOf(kind, points[0].v)}`,
@@ -889,11 +848,11 @@ function EnvelopeLane({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
     >
-      <text x={4} y={14} className="fill-[var(--chef-muted)] text-[9px]">
-        {kind === 'volume' ? label(topValue) : 'L'}
+      <text x={6} y={15} className="fill-[var(--chef-muted)] text-[10px]">
+        {label(topValue)}
       </text>
-      <text x={4} y={ENV_H - 5} className="fill-[var(--chef-muted)] text-[9px]">
-        {kind === 'volume' ? label(bottomValue) : 'R'}
+      <text x={6} y={ENV_H - 6} className="fill-[var(--chef-muted)] text-[10px]">
+        {label(bottomValue)}
       </text>
       {points.length ? (
         <>
@@ -926,8 +885,8 @@ function EnvelopeLane({
             stroke="var(--chef-muted)"
             strokeDasharray="4 4"
           />
-          <text x={56} y={14} className="fill-[var(--chef-muted)] text-[10px]">
-            Click to add {kind} points — the curve overrides the knob
+          <text x={64} y={15} className="fill-[var(--chef-muted)] text-[11px]">
+            Click to add volume points — the curve overrides the Vol slider
           </text>
         </>
       )}
@@ -984,7 +943,7 @@ function Block({
         <Outline peaks={peaks} from={clip.clipStart} seconds={len} width={width} color={file.color} />
       )}
       <FadeShade width={width} height={height} inPx={inPx} outPx={outPx} />
-      <span className="pointer-events-none absolute left-1.5 top-0.5 flex max-w-[calc(100%-24px)] items-center gap-1 truncate text-[10px] font-medium">
+      <span className="pointer-events-none absolute left-2.5 top-1 flex max-w-[calc(100%-28px)] items-center gap-1 truncate text-[11px] font-medium">
         {shifted && (
           <AlertTriangle
             className="size-3 shrink-0 text-amber-500"

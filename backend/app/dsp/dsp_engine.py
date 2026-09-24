@@ -73,7 +73,7 @@ from .noise import noise_reduce
 from .silence import remove_silence
 from .speed_pitch import speed_pitch
 from .voice_changer import voice_changer
-from .voice_shift import GENDER_TARGETS, accurate_pitch, gender_swap
+from .voice_shift import GENDER_TARGETS, child_voice, gender_swap, old_voice
 
 
 # --------------------------------------------------------------------------------------
@@ -153,22 +153,19 @@ def _reverse_op(x, fs, mode="whole", start=0.0, end=0.0):
     return reverse(x, fs)
 
 
-def _phase_vocoder_op(x, fs, mode="chipmunk", semitones=7.0, robot_freq=100.0, shift=4.0,
-                      mix=1.0):
-    """The four classic characters, an easy or accurate pitch shift, or a gender swap.
+def _phase_vocoder_op(x, fs, mode="chipmunk", semitones=7.0, robot_freq=100.0, mix=1.0):
+    """The four classic characters, a child or an old person, or a gender swap.
 
-    Easy is the plain bin shift (formants move with the pitch); accurate and the gender
-    swaps go through voice_shift.py, which moves pitch and formants separately.
+    The last four go through voice_shift.py, which moves pitch and formants separately.
     """
-    if mode == "easy_pitch":
-        return voice_changer(x, fs, mode="pitch", semitones=shift, mix=mix)
-    if mode != "accurate_pitch" and mode not in GENDER_TARGETS:
+    shaped = {"child": child_voice, "old": old_voice}
+    if mode not in shaped and mode not in GENDER_TARGETS:
         return voice_changer(x, fs, mode=mode, semitones=semitones,
                              robot_freq=robot_freq, mix=mix)
     x = np.asarray(x, dtype=np.float64)
     if x.size == 0:
         return x
-    wet = accurate_pitch(x, fs, shift) if mode == "accurate_pitch" else gender_swap(x, fs, mode)
+    wet = shaped[mode](x, fs) if mode in shaped else gender_swap(x, fs, mode)
     m = float(np.clip(mix, 0.0, 1.0))
     return (1.0 - m) * x + m * wet
 
@@ -207,12 +204,10 @@ def _echo_reverb_legacy(x, fs, mode="echo", delay=0.3, feedback=0.4, room_size=0
 #   summary     what it does, in one plain sentence -- the card's subtitle
 #   how         the technique in one line -- shown next to the maths
 #   listen_for  what a listener should hear and see change -- the card's footer
-#   quick       one-click settings: {"name": {param: shown_value, ...}}.  Names only the
-#               params it moves; everything else keeps its current value.
 #   hidden      served (so old recipes still render and bake) but not offered in the palette
 #
 # The defaults are deliberately NOT neutral: dropping a card in should make an audible,
-# visible difference straight away, and the quick settings go from there.
+# visible difference straight away, and the sliders go from there.
 # --------------------------------------------------------------------------------------
 OPERATIONS: list[dict[str, Any]] = [
     # ---- Clean up --------------------------------------------------------------------
@@ -227,11 +222,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "The hiss in the pauses drops away. On the spectrogram the grey haze "
                       "between words goes dark while the voice stripes stay.",
         "handler": noise_reduce,
-        "quick": {
-            "Subtle": {"amount": 1.2, "floor": 10},
-            "Strong": {"amount": 2.0, "floor": 5},
-            "Extreme": {"amount": 3.5, "floor": 2},
-        },
         "params": [
             _num("amount", "Strength", 2.0, 0.0, 4.0, 0.1, "x",
                  help="How hard to push the noise down. 1x removes the average noise level; "
@@ -264,11 +254,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "The output is shorter and the talking never stops. Short gaps between "
                       "words are left alone.",
         "handler": remove_silence,
-        "quick": {
-            "Gentle": {"threshold_db": -50, "min_silence": 0.6, "keep": 0.25},
-            "Tight": {"threshold_db": -40, "min_silence": 0.3, "keep": 0.1},
-            "Jump cut": {"threshold_db": -35, "min_silence": 0.15, "keep": 0.0},
-        },
         "params": [
             _num("threshold_db", "Quieter than", -40.0, -80.0, -10.0, 1.0, "dB",
                  help="Anything quieter than this counts as silence."),
@@ -290,11 +275,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "The output waveform sits on the centre line and fills the panel "
                       "to the chosen level.",
         "handler": level,
-        "quick": {
-            "Peak -1 dB": {"target": "peak", "peak_db": -1},
-            "Speech -18 dB": {"target": "rms", "rms_db": -18},
-            "DC only": {"dc": True, "target": "none"},
-        },
         "params": [
             _bool("dc", "Remove DC offset", True,
                   help="Shift the waveform back onto the zero line."),
@@ -318,13 +298,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "Bass up: fuller and boomier; treble up: crisper and brighter. The "
                       "bottom or top band of the spectrogram lights up.",
         "handler": equalizer,
-        "quick": {
-            "Subtle": {"bass_gain": 3, "mid_gain": 0, "treble_gain": 3},
-            "Strong": {"bass_gain": 6, "mid_gain": 0, "treble_gain": 6},
-            "Extreme": {"bass_gain": 15, "mid_gain": -6, "treble_gain": 15},
-            "Telephone": {"bass_gain": -24, "mid_gain": 8, "treble_gain": -24,
-                          "bass_freq": 400, "treble_freq": 3000},
-        },
         "params": [
             _num("bass_gain", "Bass", 6.0, -24.0, 24.0, 0.5, "dB",
                  help="Boost or cut everything below the bass corner (200 Hz by default)."),
@@ -355,13 +328,6 @@ OPERATIONS: list[dict[str, Any]] = [
                       "Dashed lines mark the cutoff on both spectrograms — on the Output "
                       "everything past them goes dark.",
         "handler": cutoff_filter,
-        "quick": {
-            "Muffled": {"mode": "lowpass", "cutoff": 500, "order": "8"},
-            "Telephone": {"mode": "bandpass", "cutoff": 1500, "q": 1.0},
-            "Thin": {"mode": "highpass", "cutoff": 1000, "order": "4"},
-            "Rumble cut": {"mode": "highpass", "cutoff": 80, "order": "4"},
-            "Hum notch": {"mode": "notch", "cutoff": 50, "q": 10.0},
-        },
         "params": [
             _enum("mode", "Type", "lowpass", ["lowpass", "highpass", "bandpass", "notch"],
                   option_labels={"lowpass": "Low-pass", "highpass": "High-pass",
@@ -391,11 +357,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "Quiet words become as loud as the loud ones. The waveform turns from "
                       "spiky to a solid block at the same height.",
         "handler": compressor,
-        "quick": {
-            "Subtle": {"threshold": -18, "ratio": 2.5},
-            "Strong": {"threshold": -30, "ratio": 6},
-            "Extreme": {"threshold": -45, "ratio": 20},
-        },
         "params": [
             _num("threshold", "Start squashing at", -30.0, -60.0, 0.0, 0.5, "dB",
                  help="Anything louder than this gets turned down. Lower = more of the audio "
@@ -428,10 +389,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "A sentence that was mumbled comes up to the level of the rest, and "
                       "a shouted one comes down. The gain moves in the pauses, not on the words.",
         "handler": level_voice,
-        "quick": {
-            "Gentle": {"amount": 60, "max_gain": 9},
-            "Even": {"amount": 100, "max_gain": 18},
-        },
         "params": [
             _pct("amount", "Strength", 100,
                  help="How much of each difference to even out. 100 % brings every stretch "
@@ -452,11 +409,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "Each word comes back again and again, quieter each time. The "
                       "waveform shows smaller copies trailing every burst.",
         "handler": echo,
-        "quick": {
-            "Slapback": {"delay": 0.12, "feedback": 15, "mix": 40},
-            "Canyon": {"delay": 0.35, "feedback": 50, "mix": 60},
-            "Endless": {"delay": 0.5, "feedback": 80, "mix": 75},
-        },
         "params": [
             _num("delay", "Delay", 0.35, 0.02, 2.0, 0.01, "s",
                  help="The gap between one repeat and the next."),
@@ -478,11 +430,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "A smooth tail rings on after each word. On the spectrogram the "
                       "stripes smear to the right instead of stopping sharply.",
         "handler": reverb,
-        "quick": {
-            "Small room": {"room_size": 30, "decay": 0.6, "mix": 25},
-            "Hall": {"room_size": 70, "decay": 2.5, "mix": 45},
-            "Cathedral": {"room_size": 100, "decay": 6.0, "mix": 65},
-        },
         "params": [
             _pct("room_size", "Room size", 70,
                  help="Spreads the first reflections further apart — the sense of how big the "
@@ -504,12 +451,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "Faster speech at the same voice (Keep pitch on), or a sped-up tape "
                       "(off). The output waveform is shorter or longer than the input.",
         "handler": speed_pitch,
-        "quick": {
-            "Slow-mo": {"speed": 0.6, "semitones": 0, "preserve_pitch": True},
-            "Fast talk": {"speed": 1.5, "semitones": 0, "preserve_pitch": True},
-            "Tape speed-up": {"speed": 1.3, "semitones": 0, "preserve_pitch": False},
-            "Octave down": {"speed": 1.0, "semitones": -12},
-        },
         "params": [
             _num("speed", "Speed", 1.5, 0.25, 4.0, 0.01, "x",
                  help="Playback rate. 2x = half the length."),
@@ -527,42 +468,29 @@ OPERATIONS: list[dict[str, Any]] = [
         "label": "Phase Vocoder",
         "icon": "Mic",
         "category": "Voice",
-        "summary": "Turn a voice into a chipmunk, a monster, a robot or a whisper, shift its "
-                   "pitch (easy or accurate), or swap male and female.",
+        "summary": "Turn a voice into a chipmunk, a monster, a robot, a whisper, a child or an "
+                   "old person, or swap male and female.",
         "how": "The STFT rebuilt with a new phase: bins shifted in frequency, a fixed pulse "
-               "per frame, or random phase. Accurate and male/female also reshape the "
-               "spectral envelope, so the formants move separately from the pitch.",
-        "listen_for": "Chipmunk/monster/easy: the stripes on the spectrogram move up/down, "
-                      "and so does the voice's colour. Accurate: the stripes move, the "
-                      "colour stays. Robot: they snap to evenly spaced lines. Whisper: they "
-                      "dissolve into haze.",
+               "per frame, or random phase. Child, old person and male/female also reshape "
+               "the spectral envelope, so the formants move separately from the pitch.",
+        "listen_for": "Chipmunk/monster: the stripes on the spectrogram move up/down, and so "
+                      "does the voice's colour. Robot: they snap to evenly spaced lines. "
+                      "Whisper: they dissolve into haze. Old person: the stripes waver.",
         "handler": _phase_vocoder_op,
-        "quick": {
-            "Chipmunk": {"mode": "chipmunk"},
-            "Robot": {"mode": "robot"},
-            "Male → Female": {"mode": "male_to_female"},
-            "Female → Male": {"mode": "female_to_male"},
-            "Accurate +4": {"mode": "accurate_pitch", "shift": 4},
-        },
         "params": [
             _enum("mode", "Voice", "chipmunk",
-                  ["chipmunk", "monster", "robot", "whisper", "easy_pitch", "accurate_pitch",
-                   *GENDER_TARGETS],
+                  ["chipmunk", "monster", "robot", "whisper", "child", "old", *GENDER_TARGETS],
                   option_labels={"chipmunk": "Chipmunk", "monster": "Monster",
                                  "robot": "Robot", "whisper": "Whisper",
-                                 "easy_pitch": "Easy pitch shift",
-                                 "accurate_pitch": "Accurate pitch shift",
+                                 "child": "Child", "old": "Old person",
                                  **{k: t.label for k, t in GENDER_TARGETS.items()}},
-                  help="Which character to turn the voice into. Easy pitch shift is fast but "
-                       "moves the voice's colour with the pitch (a bit cartoony); Accurate "
-                       "keeps the natural size of the voice. Male → Female / Female → Male "
-                       "move your pitch to a typical level for that voice, plus throat size."),
+                  help="Which character to turn the voice into. Child and Old person keep the "
+                       "voice natural (a smaller or older throat, not a cartoon). Male → "
+                       "Female / Female → Male move your pitch to a typical level for that "
+                       "voice, plus throat size."),
             _num("semitones", "How far", 7.0, 1.0, 12.0, 0.5, "st",
                  help="How many semitones up (chipmunk) or down (monster). 12 = one octave.",
                  show_when={"mode": ["chipmunk", "monster"]}),
-            _num("shift", "Pitch", 4.0, -12.0, 12.0, 0.5, "st",
-                 help="Semitones up (+) or down (−). 12 = one octave.",
-                 show_when={"mode": ["easy_pitch", "accurate_pitch"]}),
             _num("robot_freq", "Robot buzz", 100.0, 40.0, 300.0, 1.0, "Hz",
                  help="The one note the robot speaks on. Lower = deeper.",
                  show_when={"mode": ["robot"]}),
@@ -584,17 +512,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "Music from start to end with a beat. It dips whenever you talk or "
                       "sing and comes back up in the pauses; your voice itself is untouched.",
         "handler": background_music,
-        "quick": {
-            "Chill beat": {"style": "epiano", "tempo_bpm": 85, "drums": True, "volume": 50},
-            "Campfire guitar": {"style": "guitar", "tempo_bpm": 100, "drums": False,
-                                "volume": 50},
-            "Ambient pad": {"style": "pad", "tempo_bpm": 70, "drums": False, "volume": 40},
-            "Loud & upbeat": {"style": "guitar", "tempo_bpm": 120, "drums": True,
-                              "volume": 100},
-            # Volume only: everything else stays as it is.
-            "Quieter": {"volume": 25},
-            "Louder": {"volume": 100},
-        },
         "params": [
             _pct("volume", "Music volume", 50, hi=200,
                  help="How loud the music is next to your voice: 0 % = off, 50 % = half as "
@@ -649,11 +566,6 @@ OPERATIONS: list[dict[str, Any]] = [
         "listen_for": "The clip starts softly instead of popping on, and dies away instead "
                       "of stopping dead. The waveform tapers to a point at both ends.",
         "handler": fade,
-        "quick": {
-            "Soft start": {"fade_in": 0.5, "fade_out": 0.0},
-            "Fade out": {"fade_in": 0.0, "fade_out": 3.0},
-            "Both": {"fade_in": 1.0, "fade_out": 3.0},
-        },
         "params": [
             _num("fade_in", "Fade in", 1.0, 0.0, 30.0, 0.05, "s",
                  help="How long the start takes to rise from silence. 0 = no fade in."),

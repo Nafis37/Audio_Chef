@@ -1,5 +1,5 @@
 """
-Phase Vocoder card: easy / accurate pitch shift and the gender swaps (voice_shift.py).
+Phase Vocoder card: child, old person and the gender swaps (voice_shift.py).
 
 Checked on the source-filter "speakers" of speech_synth.py, whose f0 and formants are
 known: pitch must move by the asked amount (or land on the preset's target), and the
@@ -54,22 +54,37 @@ def test_formants_move_pitch_stays(speech):
     assert envelope_centroid(y) > 1.04 * envelope_centroid(speech)
 
 
+def pitch_spread_st(x):
+    s = analyse(x, FS)
+    return float(np.std(np.log(s.f0[s.voiced])) * 12 / np.log(2))
+
+
 def bake(x, mode, **params):
     return run_recipe(x, FS, [{"op": "voice_changer", "params": {"mode": mode, **params}}])
 
 
-def test_easy_pitch_moves_pitch_and_formants(speech):
-    y = bake(speech, "easy_pitch", shift=4)
+def test_child_is_higher_with_a_smaller_throat(speech):
+    y = bake(speech, "child")
     assert y.size == speech.size
-    assert median_f0(y) / median_f0(speech) == pytest.approx(2 ** (4 / 12), rel=0.04)
+    assert median_f0(y) / median_f0(speech) == pytest.approx(2 ** (5 / 12), rel=0.05)
     assert envelope_centroid(y) > 1.08 * envelope_centroid(speech)
 
 
-def test_accurate_pitch_moves_pitch_keeps_formants(speech):
-    y = bake(speech, "accurate_pitch", shift=4)
-    assert y.size == speech.size
-    assert median_f0(y) / median_f0(speech) == pytest.approx(2 ** (4 / 12), rel=0.04)
-    assert envelope_centroid(y) == pytest.approx(envelope_centroid(speech), rel=0.05)
+def test_child_is_not_a_chipmunk(speech):
+    # A chipmunk moves the formants by the whole pitch ratio; a child by much less.
+    child, chipmunk = bake(speech, "child"), bake(speech, "chipmunk", semitones=5)
+    assert envelope_centroid(child) < envelope_centroid(chipmunk)
+
+
+def test_old_person_is_lower_and_shaky(speech):
+    y = bake(speech, "old")
+    assert y.size == speech.size and np.all(np.isfinite(y))
+    assert median_f0(y) < 0.95 * median_f0(speech)
+    assert pitch_spread_st(y) > pitch_spread_st(speech)
+
+
+def test_old_person_is_deterministic(speech):
+    np.testing.assert_array_equal(bake(speech, "old"), bake(speech, "old"))
 
 
 @pytest.mark.parametrize("mode", list(GENDER_TARGETS))
@@ -93,7 +108,7 @@ def test_female_to_male_darkens_a_high_voice():
     assert envelope_centroid(bake(x, "female_to_male")) < 0.94 * envelope_centroid(x)
 
 
-@pytest.mark.parametrize("mode", ["easy_pitch", "accurate_pitch", *GENDER_TARGETS])
+@pytest.mark.parametrize("mode", ["child", "old", *GENDER_TARGETS])
 def test_input_without_a_voice_still_bakes(mode):
     noise = 0.05 * np.random.default_rng(0).standard_normal(3 * FS)
     y = bake(noise, mode)
@@ -102,7 +117,7 @@ def test_input_without_a_voice_still_bakes(mode):
 
 def test_removed_modes_fall_back_to_the_default(speech):
     # A recipe saved with a mode that no longer exists still bakes (as the default).
-    old = bake(speech, "ronaldo")
+    old = bake(speech, "easy_pitch")
     np.testing.assert_allclose(old, bake(speech, "chipmunk"))
 
 

@@ -6,7 +6,10 @@ voice sounds: how high it sits (pitch) and how big the speaker's throat is (form
 The plain phase-vocoder shift (voice_changer.shift_pitch_bins) moves both together, which
 is the cartoon sound.  This module moves them independently, for
 
-  * Accurate pitch shift -- pitch by a fixed number of semitones, formants kept
+  * Child -- pitch up 5 semitones AND a smaller throat (formants up 18 %): a kid, where
+    chipmunk (formants moved by the whole pitch ratio) is a cartoon
+  * Old person -- a little lower and darker, with the unsteady pitch, tremor and
+    breathiness of an older voice (see "Old person" below)
   * Male -> Female / Female -> Male -- pitch moved TO a target, formants follow a part of
     that move
 
@@ -57,6 +60,16 @@ Formants follow a part of the pitch move:
 120 Hz -> 210 Hz gives a ~ 1.18 and 210 Hz -> 115 Hz gives a ~ 0.83 -- roughly the
 difference between typical adult vocal tracts -- while a voice already near the target
 keeps its own throat.
+
+Old person
+----------
+An older voice wavers: a slow vocal tremor (~5 Hz) in both pitch and loudness, plus
+cycle-to-cycle jitter, and more breath.  Per analysis frame t (time tau):
+
+    rho[t] = ln 2 / 12 * ( OLD_SHIFT_ST + OLD_VIBRATO_ST sin(2 pi OLD_RATE tau)
+                           + OLD_JITTER_ST n[t] )          n = seeded noise, 3-frame smoothed
+    formant a = OLD_FORMANT
+    y <- y * (1 + OLD_TREMOLO sin(2 pi OLD_RATE t))  +  OLD_BREATH * whisper(y)
 """
 
 from __future__ import annotations
@@ -67,7 +80,7 @@ import numpy as np
 
 from .speech_analysis import SpeechFrames, analyse, cepstral_envelope_db, sample_at
 from .stft import istft, stft
-from .voice_changer import shift_spectrum
+from .voice_changer import shift_spectrum, whisperise
 
 CORRECTION_DB = 24.0      # clamp on the envelope correction (step 4) in either direction
 FORMANT_FOLLOW = 0.3      # formants follow this power of the pitch move (docstring)
@@ -76,6 +89,15 @@ GAP_S = 0.060             # unvoiced gaps shorter than this are bridged
 RAMP_S = 0.030            # voicing fade in / out
 MIN_SD = 0.02             # ~0.35 semitone: below this, mean shift only
 RATIO_MIN, RATIO_MAX = 0.5, 2.0
+
+CHILD_SHIFT_ST, CHILD_FORMANT = 5.0, 1.18
+OLD_SHIFT_ST, OLD_FORMANT = -2.0, 0.97
+OLD_RATE = 5.5            # Hz: vocal tremor
+OLD_VIBRATO_ST = 0.35     # semitones of tremor in the pitch
+OLD_JITTER_ST = 0.25      # semitones of cycle-to-cycle unsteadiness
+OLD_TREMOLO = 0.15        # depth of the tremor in the loudness
+OLD_BREATH = 0.12
+_SEED = 0x01D5EED         # fixed: the same input always bakes to the same output
 
 
 @dataclass(frozen=True)
@@ -180,9 +202,24 @@ def pitch_formant_shift(
     return shift_voice(x, fs, frames, rho, formant)
 
 
-def accurate_pitch(x: np.ndarray, fs: int, semitones: float) -> np.ndarray:
-    """Pitch by `semitones`, formants where they were: no chipmunk."""
-    return pitch_formant_shift(x, fs, semitones, 1.0)
+def child_voice(x: np.ndarray, fs: int) -> np.ndarray:
+    """Higher pitch and a smaller throat: a kid, not a chipmunk."""
+    return pitch_formant_shift(x, fs, CHILD_SHIFT_ST, CHILD_FORMANT)
+
+
+def old_voice(x: np.ndarray, fs: int) -> np.ndarray:
+    """A little lower and darker, wavering and breathy ("Old person" in the docstring)."""
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return x
+    frames = analyse(x, fs)
+    noise = _smooth(np.random.default_rng(_SEED).standard_normal(frames.times.size), 3)
+    semitones = (OLD_SHIFT_ST + OLD_VIBRATO_ST * np.sin(2.0 * np.pi * OLD_RATE * frames.times)
+                 + OLD_JITTER_ST * noise)
+    y = shift_voice(x, fs, frames, semitones * np.log(2.0) / 12.0, OLD_FORMANT)
+    t = np.arange(y.size) / fs
+    y = y * (1.0 + OLD_TREMOLO * np.sin(2.0 * np.pi * OLD_RATE * t))
+    return y + OLD_BREATH * whisperise(y)
 
 
 def target_moves(frames: SpeechFrames, target: GenderTarget) -> tuple[np.ndarray, float]:
