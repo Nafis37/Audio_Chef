@@ -24,7 +24,6 @@ from app.dsp.dsp_engine import (
 from app.dsp.echo_reverb import echo, reverb
 from app.dsp.editor import reverse, splice, trim
 from app.dsp.fade import fade
-from app.dsp.level import level, remove_dc
 from app.dsp.silence import remove_silence, silent_runs
 from app.dsp.eq import equalizer, high_shelf_coefficients, low_shelf_coefficients
 from app.dsp.filters import butterworth_qs, cutoff_filter, filter_response, sections
@@ -480,7 +479,7 @@ def test_no_banned_dsp_library_is_used():
                 assert name != "signal", path
 
 
-# ---- Reverse, Silence Remover, Level & DC, Fade ------------------------------------
+# ---- Reverse, Silence Remover, Fade ------------------------------------------------
 
 def test_reverse_twice_is_the_identity():
     x = np.random.default_rng(1).standard_normal(FS)
@@ -520,22 +519,6 @@ def test_silence_remover_leaves_short_gaps():
     tone = sine(300.0, 0.3)
     x = np.concatenate([tone, np.zeros(int(0.1 * FS)), tone])
     np.testing.assert_array_equal(remove_silence(x, FS, min_silence=0.3), x)
-
-
-def test_dc_blocker_removes_an_offset():
-    x = sine(200.0, 1.0) + 0.2
-    y = remove_dc(x, FS)
-    assert abs(np.mean(y)) < 1e-3
-    # Away from DC the blocker passes: the 200 Hz tone keeps its level.
-    assert abs(rms(y) - rms(sine(200.0, 1.0))) < 0.01
-
-
-def test_level_hits_its_targets():
-    x = 0.1 * sine(440.0, 0.5, amp=1.0)
-    y = level(x, FS, dc=False, target="peak", peak_db=-6.0)
-    assert np.max(np.abs(y)) == pytest.approx(10 ** (-6 / 20), rel=1e-9)
-    y = level(x, FS, dc=False, target="rms", rms_db=-20.0)
-    assert rms(y) == pytest.approx(0.1, rel=1e-9)
 
 
 @pytest.mark.parametrize("curve", ["smooth", "linear"])

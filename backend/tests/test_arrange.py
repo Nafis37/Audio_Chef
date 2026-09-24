@@ -63,13 +63,14 @@ def test_an_arrangement_plays_each_tabs_processed_audio_once():
     files = {"f1": ramp_buffer(1.0, 0.5)}
     sources = [
         SourceSpec(id="s1", file_id="f1",
-                   recipe=[RecipeStep(op="level", params={"dc": False, "peak_db": -12})]),
+                   recipe=[RecipeStep(op="fade", params={"fade_in": 1.0, "fade_out": 0.0,
+                                                         "curve": "linear"})]),
         SourceSpec(id="mix", clips=[ClipSpec(source="s1", start=0.0),
                                     ClipSpec(source="s1", start=1.0)]),
     ]
     out, report = run(sources, "mix", files)
     assert out.shape == (2 * FS, 2)
-    assert out[FS // 2] == pytest.approx([10 ** (-12 / 20)] * 2)   # s1's recipe ran
+    assert out[FS // 2] == pytest.approx([0.25] * 2, abs=1e-3)   # s1's recipe ran: half-faded
     assert [row["id"] for row in report["sources"]].count("s1") == 1
 
 
@@ -187,7 +188,7 @@ def test_an_arrangement_renders_stereo_and_its_recipe_runs_per_channel():
     sources = [
         SourceSpec(id="s1", file_id="f1"),
         SourceSpec(id="mix", clips=[ClipSpec(source="s1")], tracks=[TrackSpec(pan=-1.0)],
-                   recipe=[RecipeStep(op="level", params={"dc": False, "target": "none"})]),
+                   recipe=[RecipeStep(op="fade", params={"fade_in": 0.0, "fade_out": 0.0})]),
     ]
     out, _ = run(sources, "mix", files)
     assert out.shape == (FS, 2)

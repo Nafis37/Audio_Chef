@@ -6,7 +6,6 @@
 
 import {
   AudioLines,
-  BarChart3,
   Blend,
   Filter,
   Gauge,
@@ -37,7 +36,6 @@ const ICONS: Record<string, LucideIcon> = {
   Layers,
   Repeat,
   Blend,
-  BarChart3,
   Undo2,
   VolumeX,
 }

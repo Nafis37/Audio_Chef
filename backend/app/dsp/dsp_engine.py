@@ -67,7 +67,6 @@ from .editor import reverse, splice, trim
 from .eq import equalizer
 from .fade import CURVES as FADE_CURVES, fade
 from .filters import cutoff_filter
-from .level import level
 from .leveler import level_voice
 from .noise import noise_reduce
 from .silence import remove_silence
@@ -264,30 +263,6 @@ OPERATIONS: list[dict[str, Any]] = [
         ],
     },
     # ---- Tone & level ----------------------------------------------------------------
-    {
-        "id": "level",
-        "label": "Level & DC",
-        "icon": "BarChart3",
-        "category": "Tone & level",
-        "summary": "Re-centres the waveform on zero, then sets the loudness.",
-        "how": "Mean subtraction + a one-pole DC blocker, then one scalar gain to a peak "
-               "or RMS target.",
-        "listen_for": "The output waveform sits on the centre line and fills the panel "
-                      "to the chosen level.",
-        "handler": level,
-        "params": [
-            _bool("dc", "Remove DC offset", True,
-                  help="Shift the waveform back onto the zero line."),
-            _enum("target", "Set level by", "peak", ["peak", "rms", "none"],
-                  option_labels={"peak": "Loudest peak", "rms": "Average (RMS)",
-                                 "none": "Don't change"},
-                  help="Peak: the loudest sample hits the target. RMS: the average loudness does."),
-            _num("peak_db", "Peak target", -1.0, -24.0, 0.0, 0.5, "dB",
-                 show_when={"target": ["peak"]}),
-            _num("rms_db", "RMS target", -18.0, -40.0, -6.0, 0.5, "dB",
-                 show_when={"target": ["rms"]}),
-        ],
-    },
     {
         "id": "equalizer",
         "label": "Equalizer",
