@@ -83,7 +83,7 @@ so the duration can never drift.
 
     The phase accumulator is continuous across the change, so a smoothly varying r_t (a
     pitch contour) glides instead of clicking.  shift_spectrum() is this general form;
-    shift_pitch_bins() calls it with r_t = r for every t, and voice_match.py with a
+    shift_pitch_bins() calls it with r_t = r for every t, and voice_shift.py with a
     per-frame contour.
 
 
@@ -149,7 +149,7 @@ def shift_spectrum(
 ) -> np.ndarray:
     """Move every lobe of frame t to ratios[t] times its frequency (docstring section 1).
 
-    Takes and returns an STFT so a caller can reshape the magnitudes afterwards (voice_match
+    Takes and returns an STFT so a caller can reshape the magnitudes afterwards (voice_shift
     corrects the envelope) before the one ISTFT.  With a constant `ratios` this is exactly
     the fixed shift; with a varying one it is section 1(d).
     """

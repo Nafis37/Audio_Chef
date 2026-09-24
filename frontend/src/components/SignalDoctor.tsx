@@ -2,10 +2,12 @@
  * Signal Doctor: column 3's checklist of what is wrong with the open file, and a
  * "Fix automatically" button that appends the cards that fix it.
  *
- * Every measurement and threshold lives in backend/app/dsp/doctor.py; this component only
- * draws the verdicts.  The fix is NOT a hidden process: it becomes ordinary recipe cards
- * (Level & DC, De-clip, Filter notches, Noise Remover, ...) that can be tweaked or
- * bypassed like any other, and Auto-Bake plays the result.
+ * Six checks: clipping, uneven volume, fan / AC noise, other background noise,
+ * low-frequency rumble and long silences (3 s or more).  Every measurement and threshold
+ * lives in backend/app/dsp/doctor.py; this component only draws the verdicts.  The fix is
+ * NOT a hidden process: it becomes ordinary recipe cards (high-pass, Noise Remover,
+ * Silence Remover, Voice Leveler) that can be tweaked or bypassed like any other, and
+ * Auto-Bake plays the result.
  *
  * Two views of the same checks:
  *   Original  -- the upload as decoded, fetched once per file
@@ -74,7 +76,13 @@ function SignalDoctorImpl({ fileId, bakeId, onFix }: Props) {
   const processed = useDiagnosis('bake', view === 'processed' ? bakeId : null)
   const { report, error } = view === 'original' ? original : processed
 
-  const problems = original.report?.findings.filter((f) => f.status !== 'ok').length ?? 0
+  // Every check is listed, worst first, so problems sit on top and passes stay visible.
+  const rank = { bad: 0, warn: 1, ok: 2 }
+  const rows = [...(report?.findings ?? [])].sort((a, b) => rank[a.status] - rank[b.status])
+  // The backend prescribes for 'bad' findings only; 'warn' ones are minor.
+  const findings = original.report?.findings ?? []
+  const problems = findings.filter((f) => f.status === 'bad').length
+  const minor = findings.filter((f) => f.status === 'warn').length
   const prescription = original.report?.fix ?? []
 
   return (
@@ -112,11 +120,14 @@ function SignalDoctorImpl({ fileId, bakeId, onFix }: Props) {
           </p>
         ) : (
           <ul className="space-y-1.5">
-            {report.findings.map((finding) => (
+            {rows.map((finding) => (
               <li key={finding.id} className="flex items-start gap-2 text-xs" title={finding.detail}>
                 {ICON[finding.status]}
                 <span className={finding.status === 'ok' ? '' : 'font-medium'}>
                   {finding.title}
+                  {finding.status === 'warn' && (
+                    <span className="ml-1.5 font-normal text-[var(--chef-muted)]">minor</span>
+                  )}
                 </span>
                 <span className="ml-auto whitespace-nowrap pl-2 font-mono text-[11px] text-[var(--chef-muted)]">
                   {finding.value}
@@ -148,7 +159,11 @@ function SignalDoctorImpl({ fileId, bakeId, onFix }: Props) {
               </>
             ) : (
               <span className="text-[11px] text-[var(--chef-muted)]">
-                {problems > 0 ? 'Nothing a recipe can fix here.' : 'Nothing to fix.'}
+                {problems > 0
+                  ? 'Nothing a recipe can fix here.'
+                  : minor > 0
+                    ? 'Only minor issues, nothing worth fixing.'
+                    : 'Nothing to fix.'}
               </span>
             )}
           </div>

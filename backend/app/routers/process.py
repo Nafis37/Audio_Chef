@@ -70,6 +70,27 @@ class ClipSpec(BaseModel):
     clip_start: float = 0.0     # the span of the source it plays ...
     clip_end: float = 0.0       # ... 0 = to the source's end
     gain_db: float = 0.0
+    track: int = Field(0, ge=0, lt=config.MAX_TRACKS)
+    fade_in: float = Field(0.0, ge=0.0)     # equal-power fades; overlaps on one track
+    fade_out: float = Field(0.0, ge=0.0)    # crossfade on their own
+
+
+# (time s, value): dB for volume, -1 (left) .. +1 (right) for pan.
+EnvelopePoint = tuple[float, float]
+
+
+class TrackSpec(BaseModel):
+    """One track of an Arrange timeline: the n-th entry is the track clips call `n`.
+
+    An automation curve with points overrides its knob (dsp/arrange.py, section 3).
+    """
+
+    volume_db: float = Field(0.0, ge=-60.0, le=12.0)
+    pan: float = Field(0.0, ge=-1.0, le=1.0)
+    mute: bool = False
+    solo: bool = False
+    volume_env: list[EnvelopePoint] = Field(default_factory=list, max_length=config.MAX_ENV_POINTS)
+    pan_env: list[EnvelopePoint] = Field(default_factory=list, max_length=config.MAX_ENV_POINTS)
 
 
 class SourceSpec(BaseModel):
@@ -87,6 +108,8 @@ class SourceSpec(BaseModel):
     id: str
     file_id: Optional[str] = None
     clips: Optional[list[ClipSpec]] = None
+    # An Arrange tab's track settings; clips on a track past the end use the defaults.
+    tracks: list[TrackSpec] = Field(default_factory=list, max_length=config.MAX_TRACKS)
     recipe: list[RecipeStep] = Field(default_factory=list)
 
 
@@ -213,15 +236,18 @@ def process(request: ProcessRequest) -> Response:
 
     # "input" stays the RAW buffer of the rendered source, which is what the Input
     # waveform shows and what the input column of the stats table has always meant.
+    # An Arrange tab renders stereo; the measurements, the spectrogram and Signal Doctor
+    # all read its mono fold, while the WAV keeps both channels.
+    mono = graph.fold_to_mono(processed)
     stats = {
         "sample_rate": project_fs,
-        "input": analysis.measure(raw_input, project_fs),
-        "output": analysis.measure(processed, project_fs),
+        "input": analysis.measure(graph.fold_to_mono(raw_input), project_fs),
+        "output": analysis.measure(mono, project_fs),
         **report,
     }
 
     wav_bytes = write_wav_bytes(processed, project_fs)
-    bake_id = remember_bake(processed, project_fs)
+    bake_id = remember_bake(mono, project_fs)
     return Response(
         content=wav_bytes,
         media_type="audio/wav",

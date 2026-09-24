@@ -2,9 +2,9 @@
 
 Same two sources as the spectrogram router:
 
-    /diagnose/file/{file_id}   an upload as decoded (with its channels, for the stereo check)
-    /diagnose/bake/{bake_id}   a rendered result -- "did the fix work?"  Bakes are mono,
-                               so the stereo row reads "Mono file" there.
+    /diagnose/file/{file_id}   an upload as decoded (with its channels: clipping is judged
+                               per channel)
+    /diagnose/bake/{bake_id}   a rendered result -- "did the fix work?"
 
 The response is JSON: {"findings": [...], "fix": [recipe steps]}.  The fix steps are
 ordinary recipe cards in display units; the UI appends them to the open tab's recipe.

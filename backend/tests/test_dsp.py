@@ -22,8 +22,8 @@ from app.dsp.dsp_engine import (
     HEADROOM, OPERATIONS, _coerce, operations_schema, run_recipe, run_recipe_measured,
 )
 from app.dsp.echo_reverb import echo, reverb
-from app.dsp.declip import clipped_runs, declip
 from app.dsp.editor import reverse, splice, trim
+from app.dsp.fade import fade
 from app.dsp.level import level, remove_dc
 from app.dsp.silence import remove_silence, silent_runs
 from app.dsp.eq import equalizer, high_shelf_coefficients, low_shelf_coefficients
@@ -394,17 +394,16 @@ def test_percent_params_are_scaled_for_the_handler():
 
 
 def test_every_default_is_audible():
-    # Dropping a card in with no tweaks must change the sound.  (The editor, assemble and
-    # voice_match need a selection or other files first, so they are exempt -- voice_match
-    # is covered with its references in test_voice_match.py.  declip and silence_remover
-    # repair something this signal does not have -- flat tops, long pauses -- and are
-    # tested on signals that do, below.)
+    # Dropping a card in with no tweaks must change the sound.  (The editor and assemble
+    # need a selection or other files first, so they are exempt.  silence_remover and
+    # leveler repair something this signal does not have -- long pauses, and speech at
+    # two levels -- and are tested on signals that do: below, and in test_leveler.py.)
     # Speech-like on purpose: a loud half and a quiet half (a compressor with auto-makeup
     # is rightly a no-op on a constant level) over a little hiss (for the noise remover).
     x = np.concatenate([sine(300.0, 0.5, amp=0.4), sine(300.0, 0.5, amp=0.04)])
     x = x + 0.02 * np.random.default_rng(5).standard_normal(x.size)
     for op in OPERATIONS:
-        if op["id"] in {"editor", "assemble", "voice_match", "declip", "silence_remover"} or op.get("hidden"):
+        if op["id"] in {"editor", "assemble", "silence_remover", "leveler"} or op.get("hidden"):
             continue
         y = run_recipe(x, FS, [{"op": op["id"]}])
         n = min(x.size, y.size)
@@ -489,7 +488,7 @@ def test_no_banned_dsp_library_is_used():
                 assert name != "signal", path
 
 
-# ---- Reverse, Silence Remover, Level & DC, De-clip ----------------------------------
+# ---- Reverse, Silence Remover, Level & DC, Fade ------------------------------------
 
 def test_reverse_twice_is_the_identity():
     x = np.random.default_rng(1).standard_normal(FS)
@@ -547,10 +546,25 @@ def test_level_hits_its_targets():
     assert rms(y) == pytest.approx(0.1, rel=1e-9)
 
 
-def test_declip_restores_flattened_peaks():
-    clean = sine(200.0, 0.5, amp=1.4)            # 1.4 peak, sliced at 1.0
-    clipped = np.clip(clean, -1.0, 1.0)
-    assert clipped_runs(clipped)
-    y = declip(clipped, FS)
-    assert np.max(np.abs(y)) > 1.2                # the lost tops are redrawn
-    assert rms(y - clean) < 0.5 * rms(clipped - clean)
+@pytest.mark.parametrize("curve", ["smooth", "linear"])
+def test_fade_rises_from_and_sinks_to_silence(curve):
+    x = np.ones(3 * FS)
+    y = fade(x, FS, fade_in=1.0, fade_out=0.5, curve=curve)
+    assert y.size == x.size
+    assert y[0] < 1e-3 and y[-1] < 1e-3                       # silent at both ends
+    assert np.all(y[1:FS] >= y[:FS - 1])                      # rising, never dipping
+    assert np.all(y[-FS // 2 + 1:] <= y[-FS // 2:-1])         # falling
+    assert np.all(y[FS:-FS // 2] == 1.0)                      # untouched in between
+    assert y[FS // 2] == pytest.approx(0.5, abs=1e-3)         # halfway up at the middle
+
+
+def test_fades_longer_than_the_clip_meet_in_the_middle():
+    y = fade(np.ones(FS), FS, fade_in=3.0, fade_out=1.0)      # 4 s of fades on 1 s
+    peak = int(np.argmax(y))
+    assert 0.7 * FS < peak < 0.8 * FS                         # split 3 : 1
+    assert y[0] < 1e-3 and y[-1] < 1e-3
+
+
+def test_zero_length_fades_change_nothing():
+    x = sine(440.0, 0.5)
+    assert np.array_equal(fade(x, FS, fade_in=0.0, fade_out=0.0), x)

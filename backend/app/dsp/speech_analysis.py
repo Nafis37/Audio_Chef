@@ -3,7 +3,7 @@ Speech analysis -- pitch, voicing and spectral envelope, frame by frame
 =======================================================================
 In plain words
 --------------
-Voice Match needs three facts about every 10 ms of a recording: is anyone speaking, is the
+The voice tools and the Signal Doctor need three facts about every 10 ms of a recording: is anyone speaking, is the
 sound voiced (a buzzing vocal fold, with a pitch) or unvoiced (a hiss like "s"), and what
 shape does the spectrum have once the individual harmonics are smoothed away (the vocal
 tract's resonances -- the formants).  This module measures those three and nothing else.
@@ -125,6 +125,10 @@ HOP_S = 0.010
 F0_MIN = 60.0
 F0_MAX = 500.0
 VOICING_THRESHOLD = 0.5
+# speech_mask: what a syllable looks like (the denoiser's residue does not)
+SPEECH_RANGE_DB = 25.0
+SPEECH_MIN_RUN_S = 0.08
+SPEECH_PERIODICITY = 0.75
 LIFTER_S = 0.0016
 N_MEL = 32
 MEL_LO_HZ = 80.0
@@ -330,3 +334,29 @@ def analyse(x: np.ndarray, fs: int) -> SpeechFrames:
     return SpeechFrames(fs=fs, frame_len=frame_len, hop=hop, times=times, f0=f0,
                         voiced=voiced, active=active, periodicity=periodicity,
                         energy_db=energy_db, env=env, mel_hz=mel_hz)
+
+
+def speech_mask(frames: SpeechFrames, pad_s: float = 0.2) -> np.ndarray:
+    """Frames where someone is speaking: the voiced frames, widened by `pad_s` on each
+    side so the unvoiced consonants around them ("s", "t", breaths into a word) count too.
+
+    Voicing, not level, is what tells speech from a room: a fan can be as loud as quiet
+    talking, but it has no pitch.  Only voiced runs that sound like syllables count:
+    at least SPEECH_MIN_RUN_S long, clearly periodic (mean r >= SPEECH_PERIODICITY) and
+    within SPEECH_RANGE_DB of the loud speech (P90 of those runs).  The tonal residue a
+    denoiser leaves in the pauses is voiced too, but in 30-90 ms flickers at r ~ 0.65,
+    20-30 dB under the talking; real syllables run 100 ms and more at r ~ 0.9.
+    """
+    voiced = frames.voiced.copy()
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], voiced.astype(np.int8), [0]])))
+    min_run = max(1, int(round(SPEECH_MIN_RUN_S * frames.fs / frames.hop)))
+    for a, b in zip(edges[0::2], edges[1::2]):
+        if b - a < min_run or np.mean(frames.periodicity[a:b]) < SPEECH_PERIODICITY:
+            voiced[a:b] = False
+    if np.any(voiced):
+        loud = float(np.percentile(frames.energy_db[voiced], 90))
+        voiced &= frames.energy_db >= loud - SPEECH_RANGE_DB
+    pad = max(0, int(round(pad_s * frames.fs / frames.hop)))
+    if pad == 0 or voiced.size == 0:
+        return voiced
+    return np.convolve(voiced.astype(np.float64), np.ones(2 * pad + 1), mode="same") > 0.0

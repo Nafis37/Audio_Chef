@@ -1,5 +1,5 @@
 /**
- * The list of sources an `assemble` or `voice_match` card may point at.
+ * The list of sources an `assemble` card may point at.
  *
  * Every other control is generated entirely from the backend's parameter schema, but the
  * set of loaded files is a fact about this browser session that the DSP catalogue cannot

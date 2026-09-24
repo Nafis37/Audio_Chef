@@ -3,9 +3,11 @@ The source graph -- resolving one recipe per source, plus a master chain
 =======================================================================
 A project is no longer one buffer and one recipe.  It is a set of named sources, each
 with its own chain, and an `assemble` card inside a chain can pull in the PROCESSED
-output of another source (so can `voice_match`, which reads two calibration takes).  That makes the set a DAG rather than a list, and this module
+output of another source.  That makes the set a DAG rather than a list, and this module
 is what walks it.  An Arrange tab is a source whose raw audio is itself built from other
 sources' processed output (arrange.py), which is just more edges in the same DAG.
+It is also the one STEREO source (its tracks are panned): its chain runs per channel
+(run_chain), and whatever reads it from another source gets its mono fold (processed()).
 
     evaluate(sources, master, output_source, ...) -> (samples, fs, report)
 
@@ -29,7 +31,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from . import arrange, dsp_engine, editor, voice_calibration
+from . import arrange, dsp_engine, editor
 
 # A chain that assembles a chain that assembles ... this deep is not a real edit; it is
 # almost certainly a mistake, and the recursion has to stop somewhere regardless.
@@ -49,11 +51,10 @@ class GraphError(ValueError):
 
 
 class ClipContext:
-    """What a graph-aware handler (`assemble`, `voice_match`) is handed to reach other sources.
+    """What a graph-aware handler (`assemble`) is handed to reach other sources.
 
-    Deliberately tiny: a handler gets a few verbs -- `clip()`, `voice_profile()` and
-    `note()` -- and no way to touch the evaluator's caches, the file store or the rest of
-    the graph.
+    Deliberately tiny: a handler gets one verb -- `clip()` -- and no way to touch the
+    evaluator's caches, the file store or the rest of the graph.
     """
 
     def __init__(self, evaluator: "Evaluator", owner: str) -> None:
@@ -82,35 +83,6 @@ class ClipContext:
         # source that the next card is about to read.
         return np.array(segment, dtype=np.float64, copy=True)
 
-    def voice_profile(self, calibration_id: str, reference_id: str):
-        """The calibration profile for (your take, reference take), built at most once.
-
-        Both takes are the sources' PROCESSED output, so a Cut & Trim or Noise Remover on
-        a calibration source is honoured.  Resolving them goes through processed(), which
-        is what catches a deleted source or a cycle.
-        """
-        calibration_id = (calibration_id or "").strip()
-        reference_id = (reference_id or "").strip()
-        if not calibration_id:
-            raise GraphError("Voice Match has no calibration take selected (your reading "
-                             "of the shared script).")
-        if not reference_id:
-            raise GraphError("Voice Match has no reference take selected (the other "
-                             "speaker's reading of the same script).")
-        if calibration_id == reference_id:
-            raise GraphError("Voice Match needs two different calibration sources -- your "
-                             "reading and the other speaker's reading.")
-        if self._owner in (calibration_id, reference_id):
-            raise GraphError(
-                f"Source {self._owner!r} cannot be its own calibration take -- record the "
-                "speech to convert as a separate source."
-            )
-        return self._evaluator.voice_profile(calibration_id, reference_id)
-
-    def note(self, row: dict[str, Any]) -> None:
-        """Attach a compact diagnostics row to the bake report."""
-        self._evaluator.voice_match.append({"id": self._owner, **row})
-
 
 class Evaluator:
     """Resolves each source's chain at most once, detecting cycles as it goes."""
@@ -122,11 +94,10 @@ class Evaluator:
 
         self._raw: dict[str, np.ndarray] = {}      # decoded + resampled, pre-chain
         self._done: dict[str, np.ndarray] = {}     # memo: chain already folded
+        self._mono: dict[str, np.ndarray] = {}     # memo: stereo outputs folded to mono
         self._stack: list[str] = []                # in-progress, IN ORDER, for the path
         self._reports: dict[str, dict[str, Any]] = {}
         self.resampled: list[str] = []             # ids whose file rate != project rate
-        self._profiles: dict[tuple[str, str], Any] = {}   # (cal, ref) -> VoiceProfile
-        self.voice_match: list[dict[str, Any]] = []       # diagnostics rows, for the report
 
     # -- raw input ---------------------------------------------------------------------
     def raw(self, source_id: str) -> np.ndarray:
@@ -147,7 +118,10 @@ class Evaluator:
             # An Arrange tab: its "file" is the sum of its clips.  Built here, which
             # processed() only calls AFTER pushing this source on the stack -- so a block
             # that points back at its own arrangement is caught as a cycle.
-            buffer = arrange.render_arrangement(self.processed, spec.clips, self.fs)
+            # Stereo (frames, 2): the only kind of source that is -- tracks are panned.
+            buffer = arrange.render_arrangement(
+                self.processed, spec.clips, self.fs, getattr(spec, "tracks", None)
+            )
             self._raw[source_id] = buffer
             return buffer
 
@@ -163,7 +137,24 @@ class Evaluator:
 
     # -- processed output --------------------------------------------------------------
     def processed(self, source_id: str) -> np.ndarray:
-        """Fold `source_id`'s chain and return the result, resolving what it reaches for."""
+        """`source_id`'s processed audio, MONO -- what another source reaches for.
+
+        Everything that consumes a source (an assemble card, a timeline block, a voice
+        reference) works in mono, so a stereo arrangement is folded here, once.
+        """
+        result = self.output(source_id)
+        if result.ndim == 1:
+            return result
+        mono = self._mono.get(source_id)
+        if mono is None:
+            mono = self._mono[source_id] = fold_to_mono(result)
+        return mono
+
+    def output(self, source_id: str) -> np.ndarray:
+        """Fold `source_id`'s chain and return the result, resolving what it reaches for.
+
+        Mono for a file tab, (frames, 2) for an Arrange tab.
+        """
         memo = self._done.get(source_id)
         if memo is not None:
             return memo
@@ -180,7 +171,7 @@ class Evaluator:
         spec = self._spec(source_id)
         self._stack.append(source_id)
         try:
-            result, report = dsp_engine.run_recipe_measured(
+            result, report = run_chain(
                 self.raw(source_id),
                 self.fs,
                 [step.model_dump() for step in spec.recipe],
@@ -200,19 +191,6 @@ class Evaluator:
         self._reports[source_id] = report
         return result
 
-    # -- voice calibration -------------------------------------------------------------
-    def voice_profile(self, calibration_id: str, reference_id: str):
-        """Memoised per (cal, ref) for this evaluation; voice_calibration.get_profile adds
-        a content-keyed cache across evaluations, so Auto-Bake does not re-align."""
-        key = (calibration_id, reference_id)
-        profile = self._profiles.get(key)
-        if profile is None:
-            profile = voice_calibration.get_profile(
-                self.processed(calibration_id), self.processed(reference_id), self.fs
-            )
-            self._profiles[key] = profile
-        return profile
-
     # -- reporting ---------------------------------------------------------------------
     def source_rows(self) -> list[dict[str, Any]]:
         """A compact row per source that was actually evaluated.
@@ -226,8 +204,8 @@ class Evaluator:
             buffer = self._done[source_id]
             rows.append({
                 "id": source_id,
-                "frames": int(buffer.size),
-                "duration": round(buffer.size / self.fs, 3) if self.fs else 0.0,
+                "frames": int(buffer.shape[0]),
+                "duration": round(buffer.shape[0] / self.fs, 3) if self.fs else 0.0,
                 "steps_applied": report["steps_applied"],
                 "pre_clip_peak": report["pre_clip_peak"],
                 "truncated": report["truncated"],
@@ -241,6 +219,41 @@ class Evaluator:
                 f"Unknown source {source_id!r} -- it may have been removed from the project."
             )
         return spec
+
+
+def fold_to_mono(x: np.ndarray) -> np.ndarray:
+    """(frames, channels) -> the average of the channels; a mono buffer passes through."""
+    return x.mean(axis=1) if x.ndim == 2 else x
+
+
+def run_chain(
+    x: np.ndarray, fs: int, recipe: list[dict[str, Any]], ctx: Any = None, clip: bool = True
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """dsp_engine.run_recipe_measured, for a mono OR a stereo buffer.
+
+    Every operation is written for one channel, so a stereo buffer runs the recipe on
+    each channel on its own.  The fit to full scale is then made once over BOTH channels
+    -- fitting them separately would shift the stereo balance.
+    """
+    if x.ndim == 1:
+        return dsp_engine.run_recipe_measured(x, fs, recipe, ctx=ctx, clip=clip)
+
+    runs = [dsp_engine.run_recipe_measured(x[:, c], fs, recipe, ctx=ctx, clip=False)
+            for c in range(x.shape[1])]
+    frames = max(y.size for y, _ in runs)       # every op is deterministic, but be safe
+    y = np.zeros((frames, len(runs)), dtype=np.float64)
+    for c, (channel, _) in enumerate(runs):
+        y[: channel.size, c] = channel
+    reports = [report for _, report in runs]
+    report = {
+        **reports[0],
+        "pre_clip_peak": max(r["pre_clip_peak"] for r in reports),
+        "clipped": sum(r["clipped"] for r in reports),
+        "truncated": any(r["truncated"] for r in reports),
+    }
+    if clip:
+        y, report["normalised_db"] = dsp_engine.fit_to_full_scale(y)
+    return y, report
 
 
 def project_sample_rate(
@@ -279,7 +292,7 @@ def evaluate(
         raise GraphError("No sources loaded.")
 
     evaluator = Evaluator(sources, loader, fs)
-    rendered = evaluator.processed(output_source)
+    rendered = evaluator.output(output_source)       # stereo for an Arrange tab
 
     # The Input panel and the input column of the stats table have always meant "the
     # audio as it arrived, before the recipe" -- keep that meaning by measuring the
@@ -287,10 +300,10 @@ def evaluate(
     raw_input = evaluator.raw(output_source)
 
     if apply_master and master:
-        # No ctx: the master chain has no source identity of its own, so an assemble or
-        # voice_match card here has nothing to be relative to.  run_recipe_measured raises on that, which
+        # No ctx: the master chain has no source identity of its own, so an assemble
+        # card here has nothing to be relative to.  run_recipe_measured raises on that, which
         # the router turns into a readable 400.
-        final, master_report = dsp_engine.run_recipe_measured(
+        final, master_report = run_chain(
             rendered, fs, [step.model_dump() for step in master]
         )
     else:
@@ -310,6 +323,4 @@ def evaluate(
         "resampled": evaluator.resampled,
         "sources": evaluator.source_rows(),
     }
-    if evaluator.voice_match:
-        report["voice_match"] = evaluator.voice_match
     return final, raw_input, report

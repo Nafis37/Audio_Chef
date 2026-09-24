@@ -31,6 +31,9 @@ DEFAULT_SAMPLE_RATE = 44100
 MAX_SOURCES = 16
 # Blocks on one Arrange timeline.  Each is a slice + a sum, so this is a sanity bound.
 MAX_CLIPS = 256
+# Tracks on one timeline, and points on one automation curve.
+MAX_TRACKS = 32
+MAX_ENV_POINTS = 512
 
 # The project runs at the highest rate among its sources, but not higher than this: past
 # here the extra samples cost real time on every bake and buy nothing audible.

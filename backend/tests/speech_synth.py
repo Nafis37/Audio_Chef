@@ -1,7 +1,7 @@
 """
-A tiny source-filter speech synthesiser for the Voice Match tests.
+A tiny source-filter speech synthesiser for the voice and Signal Doctor tests.
 
-Real voices cannot live in a unit test, but the two things Voice Match manipulates can be
+Real voices cannot live in a unit test, but the two things those tests measure can be
 synthesised with known values:
 
   source  -- a harmonic comb at a KNOWN f0 contour (sum of harmonics, 1/k roll-off, so it
@@ -18,8 +18,7 @@ so a = [1, -2R cos(theta), R^2] and b = [1 - R] (a rough unit-ish gain at F), ru
 scipy.signal.lfilter.  Unvoiced "fricatives" are white noise through one resonance.
 
 A Speaker scales the formants (vocal-tract length), sets its own pitch and tilt; a script
-is a list of phoneme names, and each speaker speaks it with jittered durations -- the
-timing differences DTW has to undo.
+is a list of phoneme names, and each speaker speaks it with jittered durations.
 """
 
 from __future__ import annotations

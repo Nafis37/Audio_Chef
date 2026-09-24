@@ -1,8 +1,8 @@
 """
-Signal measurements -- the numbers shown next to the two waveforms
-==================================================================
-measure() runs on the input and on the output of every bake; ListenStats shows the two
-side by side so each effect's influence is a number, not just a picture.
+Signal measurements -- input vs output of every bake
+====================================================
+measure() runs on the input and on the output of every bake, so each effect's influence
+is a number, not just a picture.
 
 For a buffer x[0 .. N-1] at sample rate fs:
 

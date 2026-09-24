@@ -33,9 +33,16 @@
 import { DragDropContext, type DropResult } from '@hello-pangea/dnd'
 import { ChefHat, Pause, Play, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchOperations, fetchSpectrogram, processGraph, toWire, toWireClips, uploadFile } from './api'
+import {
+  fetchOperations,
+  fetchSpectrogram,
+  processGraph,
+  toWire,
+  toWireClips,
+  toWireTracks,
+  uploadFile,
+} from './api'
 import { ColumnSplitter } from './components/ColumnSplitter'
-import { ListenStats } from './components/ListenStats'
 import { OperationsPalette } from './components/OperationsPalette'
 import { Recipe } from './components/Recipe'
 import { Recorder } from './components/Recorder'
@@ -52,6 +59,7 @@ import { regionFor } from './regions'
 import { SourcesProvider, type SourceOption } from './sources'
 import {
   type ArrangeClip,
+  type ArrangeTrack,
   type BakeResult,
   type OperationDef,
   type ParamValue,
@@ -222,6 +230,7 @@ export default function App() {
           id,
           kind: 'file',
           clips: [],
+          tracks: [],
           color: sourceColor(serial),
           fileId: info.file_id,
           filename: info.filename,
@@ -261,6 +270,7 @@ export default function App() {
         id,
         kind: 'arrange',
         clips: [],
+        tracks: [],
         color: sourceColor(serial),
         fileId: null,
         filename: `Arrangement ${arrangeCount.current}`,
@@ -279,6 +289,12 @@ export default function App() {
   const setClips = useCallback((id: string, clips: ArrangeClip[]) => {
     setSources((current) =>
       current.map((source) => (source.id === id ? { ...source, clips } : source)),
+    )
+  }, [])
+
+  const setTracks = useCallback((id: string, tracks: ArrangeTrack[]) => {
+    setSources((current) =>
+      current.map((source) => (source.id === id ? { ...source, tracks } : source)),
     )
   }, [])
 
@@ -358,7 +374,12 @@ export default function App() {
     (id: string) => ({
       sources: sources.map((source) =>
         source.kind === 'arrange'
-          ? { id: source.id, clips: toWireClips(source.clips), recipe: toWire(source.recipe) }
+          ? {
+              id: source.id,
+              clips: toWireClips(source.clips),
+              tracks: toWireTracks(source.tracks),
+              recipe: toWire(source.recipe),
+            }
           : { id: source.id, file_id: source.fileId ?? '', recipe: toWire(source.recipe) },
       ),
       // No shared final chain: every tab stands on its own.
@@ -623,14 +644,14 @@ export default function App() {
   )
 
   // --- What the source dropdown sees ----------------------------------------------
-  /** Everything an assemble / voice_match card in THIS chain may point at.
+  /** Everything an assemble card in THIS chain may point at.
    *
    *  The chain's own source is filtered out: a source referencing itself is always a
    *  cycle, so offering it would only ever produce a backend error. */
   const sourceOptions: SourceOption[] = useMemo(
     () =>
       sources
-        // An Arrange tab has no source of its own to be a calibration take or a clip of.
+        // An Arrange tab has no source of its own to be a voice reference or a clip of.
         .filter((source) => source.id !== editing && source.kind === 'file')
         .map((source) => ({ id: source.id, label: source.filename })),
     [sources, editing],
@@ -801,6 +822,12 @@ export default function App() {
     },
     [editing, setClips],
   )
+  const onTracksChange = useCallback(
+    (tracks: ArrangeTrack[]) => {
+      if (editing) setTracks(editing, tracks)
+    },
+    [editing, setTracks],
+  )
 
   return (
     <div className="flex h-screen flex-col bg-[var(--chef-bg)] text-[var(--chef-text)]">
@@ -895,7 +922,13 @@ export default function App() {
                 {isArrange && editingSource ? (
                   /* An Arrange tab has no input of its own: the timeline IS its content,
                      and the Output below plays the mix through this tab's recipe. */
-                  <Timeline clips={editingSource.clips} files={fileTabs} onChange={onClipsChange} />
+                  <Timeline
+                    clips={editingSource.clips}
+                    tracks={editingSource.tracks}
+                    files={fileTabs}
+                    onChange={onClipsChange}
+                    onTracksChange={onTracksChange}
+                  />
                 ) : (
                   <>
                     {/* A/B: one transport for both panels.  Picking a side mid-playback carries
@@ -975,10 +1008,6 @@ export default function App() {
                   fileId={editingSource?.fileId ?? null}
                   bakeId={output?.bakeId ?? null}
                   onFix={appendSteps}
-                />
-                <ListenStats
-                  stats={output?.stats ?? null}
-                  bakeMs={output?.bakeMs ?? 0}
                 />
               </div>
             ) : (

@@ -47,8 +47,8 @@ records what it saw first
 
         pre_clip_peak = max |y[n]|            clipped = #{ n : |y[n]| > 1 }
 
-(`clipped` = how many samples WOULD have clipped) -- that is how ListenStats can say "the
-recipe peaked at +4.2 dB and was turned down 4.4 dB" instead of silently getting quieter.
+(`clipped` = how many samples WOULD have clipped) -- so the report can say "the recipe
+peaked at +4.2 dB and was turned down 4.4 dB" instead of silently getting quieter.
 """
 
 from __future__ import annotations
@@ -58,19 +58,22 @@ from typing import Any
 import numpy as np
 
 from . import mixer
-from .caricature import CARICATURES, apply_tempo, caricature, tempo_of
+from .backing import CHORD_MODES as BACKING_CHORD_MODES
+from .backing import STYLES as BACKING_STYLES
+from .backing import background_music
 from .compressor import compressor
-from .declip import declip
 from .echo_reverb import echo, reverb
 from .editor import reverse, splice, trim
 from .eq import equalizer
+from .fade import CURVES as FADE_CURVES, fade
 from .filters import cutoff_filter
 from .level import level
+from .leveler import level_voice
 from .noise import noise_reduce
 from .silence import remove_silence
 from .speed_pitch import speed_pitch
 from .voice_changer import voice_changer
-from .voice_match import voice_match
+from .voice_shift import GENDER_TARGETS, accurate_pitch, gender_swap
 
 
 # --------------------------------------------------------------------------------------
@@ -150,21 +153,24 @@ def _reverse_op(x, fs, mode="whole", start=0.0, end=0.0):
     return reverse(x, fs)
 
 
-def _phase_vocoder_op(x, fs, mode="chipmunk", semitones=7.0, robot_freq=100.0, mix=1.0):
-    """The four classic characters, or a celebrity caricature (caricature.py).
+def _phase_vocoder_op(x, fs, mode="chipmunk", semitones=7.0, robot_freq=100.0, shift=4.0,
+                      mix=1.0):
+    """The four classic characters, an easy or accurate pitch shift, or a gender swap.
 
-    A caricature's tempo changes the length, so the dry/wet blend happens first -- on two
-    buffers of the same length -- and the tempo is applied to the blend.
+    Easy is the plain bin shift (formants move with the pitch); accurate and the gender
+    swaps go through voice_shift.py, which moves pitch and formants separately.
     """
-    if mode not in CARICATURES:
+    if mode == "easy_pitch":
+        return voice_changer(x, fs, mode="pitch", semitones=shift, mix=mix)
+    if mode != "accurate_pitch" and mode not in GENDER_TARGETS:
         return voice_changer(x, fs, mode=mode, semitones=semitones,
                              robot_freq=robot_freq, mix=mix)
     x = np.asarray(x, dtype=np.float64)
     if x.size == 0:
         return x
+    wet = accurate_pitch(x, fs, shift) if mode == "accurate_pitch" else gender_swap(x, fs, mode)
     m = float(np.clip(mix, 0.0, 1.0))
-    blend = (1.0 - m) * x + m * caricature(x, fs, mode)
-    return apply_tempo(blend, tempo_of(mode))
+    return (1.0 - m) * x + m * wet
 
 
 def _assemble_op(x, fs, ctx, source="", mode="mix", position=0.0,
@@ -181,22 +187,6 @@ def _assemble_op(x, fs, ctx, source="", mode="mix", position=0.0,
     if mode == "append":
         return mixer.append_to(x, clip, fs, gain_db=gain)
     return mixer.mix_at(x, clip, fs, position=position, gain_db=gain)
-
-
-def _voice_match_op(x, fs, ctx, calibration_source="", reference_source="",
-                    pitch_strength=1.0, timbre_strength=0.7):
-    """Convert this source toward the reference speaker, calibrated on two other sources.
-
-    Both strengths at 0 is an exact bypass -- the buffer comes back untouched, and the
-    calibration takes are not even read.
-    """
-    if pitch_strength <= 0.0 and timbre_strength <= 0.0:
-        return x
-    profile = ctx.voice_profile(calibration_source, reference_source)
-    y, diagnostics = voice_match(x, fs, profile, pitch_strength=pitch_strength,
-                                 timbre_strength=timbre_strength)
-    ctx.note({**profile.diagnostics, **diagnostics})
-    return y
 
 
 def _echo_reverb_legacy(x, fs, mode="echo", delay=0.3, feedback=0.4, room_size=0.5,
@@ -261,22 +251,6 @@ OPERATIONS: list[dict[str, Any]] = [
                  help="Never cut any band below this much of its original level. A small "
                       "remainder masks the watery 'musical noise' that full removal leaves.",
                  advanced=True),
-        ],
-    },
-    {
-        "id": "declip",
-        "label": "De-clip",
-        "icon": "Activity",
-        "category": "Clean up",
-        "summary": "Redraws peaks that were sliced flat by recording too loud.",
-        "how": "Each flat top of 3+ samples is replaced by a cubic Hermite curve that "
-               "continues the slopes into and out of it.",
-        "listen_for": "Harsh crackle on the loudest words softens. The output peak rises "
-                      "above the old ceiling (and the whole file is turned down to fit).",
-        "handler": declip,
-        "params": [
-            _pct("thresh", "Clip level", 99, lo=80, hi=100,
-                 help="Samples at or above this fraction of the file's peak count as clipped."),
         ],
     },
     {
@@ -443,6 +417,30 @@ OPERATIONS: list[dict[str, Any]] = [
                  help="A fixed boost added on top, after auto-makeup.", advanced=True),
         ],
     },
+    {
+        "id": "leveler",
+        "label": "Voice Leveler",
+        "icon": "AudioLines",
+        "category": "Tone & level",
+        "summary": "Evens out quiet and loud stretches of speech, phrase by phrase.",
+        "how": "Finds the speech by its pitch, measures its level over ~1 s windows above "
+               "the room's noise, and rides a smooth gain toward the file's own loud level.",
+        "listen_for": "A sentence that was mumbled comes up to the level of the rest, and "
+                      "a shouted one comes down. The gain moves in the pauses, not on the words.",
+        "handler": level_voice,
+        "quick": {
+            "Gentle": {"amount": 60, "max_gain": 9},
+            "Even": {"amount": 100, "max_gain": 18},
+        },
+        "params": [
+            _pct("amount", "Strength", 100,
+                 help="How much of each difference to even out. 100 % brings every stretch "
+                      "to the same level."),
+            _num("max_gain", "Most change", 18.0, 0.0, 24.0, 0.5, "dB",
+                 help="The furthest any stretch is turned up or down. Lower keeps more of "
+                      "the natural rise and fall."),
+        ],
+    },
     # ---- Space -----------------------------------------------------------------------
     {
         "id": "echo",
@@ -529,31 +527,42 @@ OPERATIONS: list[dict[str, Any]] = [
         "label": "Phase Vocoder",
         "icon": "Mic",
         "category": "Voice",
-        "summary": "Turn a voice into a chipmunk, a monster, a robot, a whisper -- or a "
-                   "rough caricature of a famous voice.",
+        "summary": "Turn a voice into a chipmunk, a monster, a robot or a whisper, shift its "
+                   "pitch (easy or accurate), or swap male and female.",
         "how": "The STFT rebuilt with a new phase: bins shifted in frequency, a fixed pulse "
-               "per frame, or random phase.",
-        "listen_for": "Chipmunk/monster: the stripes on the spectrogram move up/down. Robot: "
-                      "they snap to evenly spaced lines. Whisper: they dissolve into haze.",
+               "per frame, or random phase. Accurate and male/female also reshape the "
+               "spectral envelope, so the formants move separately from the pitch.",
+        "listen_for": "Chipmunk/monster/easy: the stripes on the spectrogram move up/down, "
+                      "and so does the voice's colour. Accurate: the stripes move, the "
+                      "colour stays. Robot: they snap to evenly spaced lines. Whisper: they "
+                      "dissolve into haze.",
         "handler": _phase_vocoder_op,
         "quick": {
             "Chipmunk": {"mode": "chipmunk"},
             "Robot": {"mode": "robot"},
-            "Ronaldo": {"mode": "ronaldo"},
-            "Messi": {"mode": "messi"},
-            "Trump": {"mode": "trump"},
+            "Male → Female": {"mode": "male_to_female"},
+            "Female → Male": {"mode": "female_to_male"},
+            "Accurate +4": {"mode": "accurate_pitch", "shift": 4},
         },
         "params": [
             _enum("mode", "Voice", "chipmunk",
-                  ["chipmunk", "monster", "robot", "whisper", *CARICATURES],
+                  ["chipmunk", "monster", "robot", "whisper", "easy_pitch", "accurate_pitch",
+                   *GENDER_TARGETS],
                   option_labels={"chipmunk": "Chipmunk", "monster": "Monster",
                                  "robot": "Robot", "whisper": "Whisper",
-                                 **{k: c.label for k, c in CARICATURES.items()}},
-                  help="Which character to turn the voice into. The celebrity voices are "
-                       "loose impressions (pitch, throat size, pace, rasp) -- not clones."),
+                                 "easy_pitch": "Easy pitch shift",
+                                 "accurate_pitch": "Accurate pitch shift",
+                                 **{k: t.label for k, t in GENDER_TARGETS.items()}},
+                  help="Which character to turn the voice into. Easy pitch shift is fast but "
+                       "moves the voice's colour with the pitch (a bit cartoony); Accurate "
+                       "keeps the natural size of the voice. Male → Female / Female → Male "
+                       "move your pitch to a typical level for that voice, plus throat size."),
             _num("semitones", "How far", 7.0, 1.0, 12.0, 0.5, "st",
                  help="How many semitones up (chipmunk) or down (monster). 12 = one octave.",
                  show_when={"mode": ["chipmunk", "monster"]}),
+            _num("shift", "Pitch", 4.0, -12.0, 12.0, 0.5, "st",
+                 help="Semitones up (+) or down (−). 12 = one octave.",
+                 show_when={"mode": ["easy_pitch", "accurate_pitch"]}),
             _num("robot_freq", "Robot buzz", 100.0, 40.0, 300.0, 1.0, "Hz",
                  help="The one note the robot speaks on. Lower = deeper.",
                  show_when={"mode": ["robot"]}),
@@ -561,37 +570,51 @@ OPERATIONS: list[dict[str, Any]] = [
                  help="Blend with the original voice.", advanced=True),
         ],
     },
+    # ---- Music -----------------------------------------------------------------------
     {
-        "id": "voice_match",
-        "label": "Voice Match",
-        "icon": "UsersRound",
-        "category": "Voice",
-        "summary": "Move your voice toward another speaker's, learned from one shared "
-                   "script you both read.",
-        "how": "Autocorrelation pitch + cepstral envelopes, DTW-aligned into a paired "
-               "codebook; a time-varying phase-locked pitch shift, then an envelope "
-               "correction toward the looked-up target.",
-        "listen_for": "The pitch lands in the other speaker's range without a chipmunk "
-                      "sound, and the vowels take on their colour. Silences and 's' "
-                      "sounds stay as they were.",
-        "handler": _voice_match_op,
-        "needs_ctx": True,
+        "id": "backing",
+        "label": "Background Music",
+        "icon": "Piano",
+        "category": "Music",
+        "summary": "Adds a music bed under your recording: chords, bass and drums, in a "
+                   "key that suits your voice.",
+        "how": "Key by circular cross-correlation with key profiles -> a I-V-vi-IV loop "
+               "on a tempo grid -> synthesized chords, bass and drums (chirp kick, "
+               "filtered-noise snare and hat), ducked by a sidechain envelope follower.",
+        "listen_for": "Music from start to end with a beat. It dips whenever you talk or "
+                      "sing and comes back up in the pauses; your voice itself is untouched.",
+        "handler": background_music,
         "quick": {
-            "Pitch only": {"pitch_strength": 100, "timbre_strength": 0},
-            "Timbre only": {"pitch_strength": 0, "timbre_strength": 70},
-            "Full": {"pitch_strength": 100, "timbre_strength": 70},
+            "Chill beat": {"style": "epiano", "tempo_bpm": 85, "drums": True, "volume": 50},
+            "Campfire guitar": {"style": "guitar", "tempo_bpm": 100, "drums": False,
+                                "volume": 50},
+            "Ambient pad": {"style": "pad", "tempo_bpm": 70, "drums": False, "volume": 40},
+            "Loud & upbeat": {"style": "guitar", "tempo_bpm": 120, "drums": True,
+                              "volume": 100},
+            # Volume only: everything else stays as it is.
+            "Quieter": {"volume": 25},
+            "Louder": {"volume": 100},
         },
         "params": [
-            _source("calibration_source", "Your calibration",
-                    help="YOUR reading of the shared script (30-60 s, at most 2 min). Record "
-                         "it cleanly, with the same mic placement as the other speaker."),
-            _source("reference_source", "Their calibration",
-                    help="The OTHER speaker's reading of the same script."),
-            _pct("pitch_strength", "Pitch", 100,
-                 help="How far to move your pitch into their range. 0 keeps your own pitch."),
-            _pct("timbre_strength", "Timbre", 70,
-                 help="How far to move your vowel colour (formants) toward theirs. Frames "
-                      "unlike anything in the calibration get less."),
+            _pct("volume", "Music volume", 50, hi=200,
+                 help="How loud the music is next to your voice: 0 % = off, 50 % = half as "
+                      "loud, 100 % = as loud as you, 200 % = twice as loud."),
+            _enum("style", "Instrument", "pad", list(BACKING_STYLES),
+                  option_labels={"pad": "Soft pad", "epiano": "Electric piano",
+                                 "organ": "Organ", "guitar": "Strummed guitar"},
+                  help="What plays the chords."),
+            _enum("chords", "Chords", "loop", list(BACKING_CHORD_MODES),
+                  option_labels={"loop": "Pop progression (loop)",
+                                 "follow": "Follow my singing"},
+                  help="A repeating I-V-vi-IV progression, or chords picked to fit the "
+                       "notes you sing (for singing, not talking)."),
+            _num("tempo_bpm", "Tempo", 90.0, 60.0, 160.0, 1.0, "BPM",
+                 help="Beats per minute. The chord changes every 4 beats."),
+            _bool("drums", "Drums", True, help="A kick, snare and hi-hat beat."),
+            _num("duck_db", "Dip under voice", 4.0, 0.0, 18.0, 1.0, "dB",
+                 help="How much the music dips while you talk. 0 = it never dips."),
+            _bool("bass", "Bass", True, help="A bass line on the chord roots.",
+                  advanced=True),
         ],
     },
     # ---- Edit ------------------------------------------------------------------------
@@ -613,6 +636,33 @@ OPERATIONS: list[dict[str, Any]] = [
                  help="Start of the selection (or drag the green region)."),
             _num("end", "To", 0.0, 0.0, 600.0, 0.01, "s", "number",
                  help="End of the selection. 0 = the end of the file."),
+        ],
+    },
+    {
+        "id": "fade",
+        "label": "Fade",
+        "icon": "Blend",
+        "category": "Edit",
+        "summary": "Brings the sound in from silence at the start and out to silence at the end.",
+        "how": "The first and last seconds are multiplied by a gain that rises 0 -> 1 "
+               "(and falls 1 -> 0) along an S-curve or a straight line.",
+        "listen_for": "The clip starts softly instead of popping on, and dies away instead "
+                      "of stopping dead. The waveform tapers to a point at both ends.",
+        "handler": fade,
+        "quick": {
+            "Soft start": {"fade_in": 0.5, "fade_out": 0.0},
+            "Fade out": {"fade_in": 0.0, "fade_out": 3.0},
+            "Both": {"fade_in": 1.0, "fade_out": 3.0},
+        },
+        "params": [
+            _num("fade_in", "Fade in", 1.0, 0.0, 30.0, 0.05, "s",
+                 help="How long the start takes to rise from silence. 0 = no fade in."),
+            _num("fade_out", "Fade out", 2.0, 0.0, 30.0, 0.05, "s",
+                 help="How long the end takes to sink to silence. 0 = no fade out."),
+            _enum("curve", "Shape", "smooth", list(FADE_CURVES),
+                  option_labels={"smooth": "Smooth (S-curve)", "linear": "Straight line"},
+                  help="Smooth eases in and out of the fade; a straight line is more abrupt "
+                       "at the quiet end."),
         ],
     },
     {
@@ -749,7 +799,7 @@ def run_recipe_measured(
     recipe ran to the end -- so the UI can explain the output instead of just drawing it.
 
     `ctx` is the graph handle for operations that reach outside their own buffer (see
-    _assemble_op and _voice_match_op).  It is None for the master chain, which has no source identity for a
+    _assemble_op).  It is None for the master chain, which has no source identity for a
     clip position to be relative to.
 
     `clip` is False for an INTERMEDIATE chain -- one whose output feeds another chain

@@ -116,6 +116,8 @@ export interface Source {
   url: string | null
   /** An Arrange tab's blocks; empty for a file tab. */
   clips: ArrangeClip[]
+  /** An Arrange tab's track settings, by track index; a track past the end is default. */
+  tracks: ArrangeTrack[]
   sampleRate: number
   channels: number
   /** Raw length in seconds -- what this source's region handles are measured against. */
@@ -127,7 +129,7 @@ export interface Source {
 
 /**
  * One block on an Arrange timeline.  Seconds throughout; `clipEnd` 0 = the source's end.
- * `lane` is UI-only (the backend just sums the blocks).
+ * `lane` is the track it sits on (backend dsp/arrange.py).
  */
 export interface ArrangeClip {
   uid: string
@@ -139,6 +141,26 @@ export interface ArrangeClip {
   clipEnd: number
   gainDb: number
   lane: number
+  /** Equal-power fade lengths, seconds.  Overlaps on one track crossfade on their own. */
+  fadeIn: number
+  fadeOut: number
+}
+
+/** One point of an automation curve: time (s) and value (dB, or pan -1 .. +1). */
+export interface EnvPoint {
+  t: number
+  v: number
+}
+
+/** One track of an Arrange timeline.  A curve with points overrides its knob. */
+export interface ArrangeTrack {
+  volumeDb: number
+  /** -1 = left, +1 = right. */
+  pan: number
+  mute: boolean
+  solo: boolean
+  volumeEnv: EnvPoint[]
+  panEnv: EnvPoint[]
 }
 
 /** An Arrange block as the backend wants it. */
@@ -148,11 +170,30 @@ export interface WireClip {
   clip_start: number
   clip_end: number
   gain_db: number
+  track: number
+  fade_in: number
+  fade_out: number
+}
+
+/** A track as the backend wants it. */
+export interface WireTrack {
+  volume_db: number
+  pan: number
+  mute: boolean
+  solo: boolean
+  volume_env: [number, number][]
+  pan_env: [number, number][]
 }
 
 /** The body of POST /process. */
 export interface ProcessGraphRequest {
-  sources: { id: string; file_id?: string; clips?: WireClip[]; recipe: WireStep[] }[]
+  sources: {
+    id: string
+    file_id?: string
+    clips?: WireClip[]
+    tracks?: WireTrack[]
+    recipe: WireStep[]
+  }[]
   master: WireStep[]
   output_source: string
   apply_master: boolean
@@ -165,90 +206,6 @@ export interface WireStep {
   params: Record<string, ParamValue>
 }
 
-/**
- * Measurements of one buffer, as computed by backend/app/dsp/analysis.py.
- *
- * Amplitudes are in [0, 1] and the `_db` fields are dBFS (0 dB = full scale), floored at
- * -120 dB so digital silence stays a finite number.
- */
-export interface Measures {
-  duration: number
-  frames: number
-  peak: number
-  peak_db: number
-  rms: number
-  rms_db: number
-  /** peak_db - rms_db: how spiky the waveform is relative to how loud it is. */
-  crest_db: number
-  dc: number
-  /** Zero crossings per second -- a transform-free brightness proxy. */
-  zcr: number
-  /** Magnitude-weighted mean frequency, in Hz. */
-  centroid_hz: number
-}
-
-/** One row of the per-source summary in X-Bake-Stats.  Deliberately compact: it rides
- *  back on every bake inside a response header. */
-export interface SourceReport {
-  id: string
-  frames: number
-  duration: number
-  steps_applied: number
-  pre_clip_peak: number
-  truncated: boolean
-}
-
-/** What one Voice Match card reported: calibration feedback, never a similarity score. */
-export interface VoiceMatchReport {
-  /** The source whose recipe holds the card. */
-  id: string
-  /** Seconds of voiced speech found in each calibration take. */
-  cal_voiced_s: number
-  ref_voiced_s: number
-  /** Median pitch of each speaker's calibration take, Hz. */
-  cal_f0_hz: number
-  ref_f0_hz: number
-  /** Spread (standard deviation) of each speaker's pitch, in semitones. */
-  cal_f0_spread_st: number
-  ref_f0_spread_st: number
-  /** DTW path cost relative to random frame pairs: lower = the takes lined up better. */
-  align_cost: number
-  /** Paired calibration frames available to look up. */
-  codebook: number
-  /** Voiced seconds in the speech being converted. */
-  voiced_s: number
-  /** Share of voiced frames unlike the calibration, which got less timbre change. */
-  reduced_fraction: number
-  /** Median pitch shift applied, semitones. */
-  shift_st: number
-}
-
-/** The X-Bake-Stats header: both buffers measured, plus what the graph walk did. */
-export interface BakeStats {
-  sample_rate: number
-  /** The RAW buffer of the rendered source, before its chain ran. */
-  input: Measures
-  output: Measures
-  /** The one rate the whole evaluation ran at (the highest among the sources). */
-  project_sample_rate: number
-  /** Ids whose file rate differed and were converted -- so a pitch change is explained. */
-  resampled: string[]
-  /** Only the sources the walk actually reached; an unreferenced source is absent. */
-  sources: SourceReport[]
-  /** max |y| BEFORE the final fit to full scale -- >1 means it had to be turned down. */
-  pre_clip_peak: number
-  /** How many samples WOULD have gone past full scale. */
-  clipped: number
-  /** <= 0: how far the whole output was turned down to fit instead of clipping. */
-  normalised_db?: number
-  steps_applied: number
-  steps_bypassed: number
-  /** A step emptied the buffer and the fold stopped early. */
-  truncated: boolean
-  /** One row per Voice Match card that ran; absent when there were none. */
-  voice_match?: VoiceMatchReport[]
-}
-
 /** Result of a bake: the rendered audio plus what the backend reported about it. */
 export interface BakeResult {
   url: string
@@ -256,8 +213,6 @@ export interface BakeResult {
   bakeId: string | null
   bakeMs: number
   duration: number
-  /** null if the backend did not send (or CORS hid) the X-Bake-Stats header. */
-  stats: BakeStats | null
 }
 
 /** A spectrogram as served by GET /spectrogram/...: uint8 grid, row 0 = highest frequency. */

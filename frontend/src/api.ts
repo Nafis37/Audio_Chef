@@ -7,9 +7,10 @@
 
 import type {
   ArrangeClip,
+  ArrangeTrack,
   BakeResult,
-  BakeStats,
   DoctorReport,
+  EnvPoint,
   OperationDef,
   ProcessGraphRequest,
   RecipeStep,
@@ -17,6 +18,7 @@ import type {
   UploadInfo,
   WireClip,
   WireStep,
+  WireTrack,
 } from './types'
 
 const BASE = '/api'
@@ -27,20 +29,6 @@ async function detail(response: Response): Promise<string> {
     return body.detail ?? response.statusText
   } catch {
     return response.statusText
-  }
-}
-
-/**
- * X-Bake-Stats is a convenience, not a contract: an older backend or a deployment that
- * forgot to expose the header should cost the numbers panel, not the bake.
- */
-function readStats(response: Response): BakeStats | null {
-  const raw = response.headers.get('X-Bake-Stats')
-  if (!raw) return null
-  try {
-    return JSON.parse(raw) as BakeStats
-  } catch {
-    return null
   }
 }
 
@@ -67,12 +55,27 @@ export function toWire(recipe: RecipeStep[]): WireStep[] {
 
 /** Arrange blocks as the backend's ClipSpec -- lane and uid are UI concerns. */
 export function toWireClips(clips: ArrangeClip[]): WireClip[] {
-  return clips.map(({ source, start, clipStart, clipEnd, gainDb }) => ({
+  return clips.map(({ source, start, clipStart, clipEnd, gainDb, lane, fadeIn, fadeOut }) => ({
     source,
     start,
     clip_start: clipStart,
     clip_end: clipEnd,
     gain_db: gainDb,
+    track: lane,
+    fade_in: fadeIn,
+    fade_out: fadeOut,
+  }))
+}
+
+export function toWireTracks(tracks: ArrangeTrack[]): WireTrack[] {
+  const curve = (points: EnvPoint[]) => points.map((p): [number, number] => [p.t, p.v])
+  return tracks.map((track) => ({
+    volume_db: track.volumeDb,
+    pan: track.pan,
+    mute: track.mute,
+    solo: track.solo,
+    volume_env: curve(track.volumeEnv),
+    pan_env: curve(track.panEnv),
   }))
 }
 
@@ -101,7 +104,6 @@ export async function processGraph(
     bakeId: response.headers.get('X-Bake-Id'),
     bakeMs: Number(response.headers.get('X-Bake-Ms') ?? 0),
     duration: Number(response.headers.get('X-Output-Duration') ?? 0),
-    stats: readStats(response),
   }
 }
 
