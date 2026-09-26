@@ -17,6 +17,7 @@ import {
   Scissors,
   SlidersHorizontal,
   Undo2,
+  Volume2,
   VolumeX,
   Wand2,
   Waves,
@@ -37,6 +38,7 @@ const ICONS: Record<string, LucideIcon> = {
   Repeat,
   Blend,
   Undo2,
+  Volume2,
   VolumeX,
 }
 

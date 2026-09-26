@@ -479,6 +479,15 @@ def test_no_banned_dsp_library_is_used():
                 assert name != "signal", path
 
 
+# ---- Volume --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("gain_db", [-12.0, -6.0, 0.0, 6.0])
+def test_volume_is_one_scalar_gain(gain_db):
+    x = sine(440.0, 0.5, amp=0.1)
+    y = run_recipe(x, FS, [{"op": "volume", "params": {"gain_db": gain_db}}])
+    np.testing.assert_allclose(y, x * 10 ** (gain_db / 20), atol=1e-12)
+
+
 # ---- Reverse, Silence Remover, Fade ------------------------------------------------
 
 def test_reverse_twice_is_the_identity():

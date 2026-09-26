@@ -138,6 +138,11 @@ def _source(name, label, *, help=""):
 # --------------------------------------------------------------------------------------
 # Adapters: some ops need a bit of dispatch before reaching the DSP function.
 # --------------------------------------------------------------------------------------
+def _volume_op(x, fs, gain_db=0.0):
+    """One scalar gain, y = 10^(G/20) x: louder or quieter, the sound otherwise unchanged."""
+    return np.asarray(x, dtype=np.float64) * 10.0 ** (float(gain_db) / 20.0)
+
+
 def _editor_op(x, fs, mode="trim", start=0.0, end=0.0):
     """Trim keeps the selected region; splice removes it."""
     if mode == "splice":
@@ -264,6 +269,22 @@ OPERATIONS: list[dict[str, Any]] = [
     },
     # ---- Tone & level ----------------------------------------------------------------
     {
+        "id": "volume",
+        "label": "Volume",
+        "icon": "Volume2",
+        "category": "Tone & level",
+        "summary": "Turns the whole clip up or down.",
+        "how": "One scalar gain: y = 10^(G/20) x.",
+        "listen_for": "The same sound, louder or quieter. +6 dB is about twice the "
+                      "amplitude, -6 dB about half.",
+        "handler": _volume_op,
+        "params": [
+            _num("gain_db", "Volume", 6.0, -24.0, 24.0, 0.5, "dB",
+                 help="Up (+) or down (-). If a boost would clip, the final output is "
+                      "turned back down just enough to fit."),
+        ],
+    },
+    {
         "id": "equalizer",
         "label": "Equalizer",
         "icon": "SlidersHorizontal",
@@ -342,15 +363,6 @@ OPERATIONS: list[dict[str, Any]] = [
             _bool("auto_makeup", "Auto-makeup", True,
                   help="Lift everything back up so the loudest peak is where it started. This "
                        "is what makes the quiet parts come UP."),
-            _num("attack", "Attack", 5.0, 0.1, 200.0, 0.1, "ms",
-                 help="How quickly it reacts to a sudden loud sound.", advanced=True),
-            _num("release", "Release", 150.0, 5.0, 1000.0, 1.0, "ms",
-                 help="How quickly it lets go once things get quiet again.", advanced=True),
-            _num("knee", "Knee", 6.0, 0.0, 24.0, 0.5, "dB",
-                 help="How gently it eases in around the threshold. 0 = a hard corner.",
-                 advanced=True),
-            _num("makeup", "Extra gain", 0.0, 0.0, 24.0, 0.5, "dB",
-                 help="A fixed boost added on top, after auto-makeup.", advanced=True),
         ],
     },
     {
