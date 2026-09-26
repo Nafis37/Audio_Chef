@@ -44,6 +44,7 @@ import HoverPlugin from 'wavesurfer.js/dist/plugins/hover.esm.js'
 import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js'
 import { formatTime, rulerSpacing, type RulerSpacing } from '../time'
 import type { SpectrogramData, SpectrogramMarker } from '../types'
+import { FrequencyBars, type FrequencyBarsHandle } from './FrequencyBars'
 import { Spectrogram } from './Spectrogram'
 
 /** What App can do to a viewer from outside -- enough for an A/B switch. */
@@ -151,6 +152,8 @@ function WaveformViewerImpl({
   // The running clock is written straight into the DOM: a state update per
   // 'timeupdate' would re-render this panel ~60 times a second during playback.
   const clock = useRef<HTMLSpanElement>(null)
+  // The live frequency bars ride on the same clock, for the same reason.
+  const bars = useRef<FrequencyBarsHandle>(null)
   const [ready, setReady] = useState(false)
   // Set when the BROWSER cannot decode the file.  The backend decodes with libsndfile,
   // which reads more formats than any browser does (AIFF, W64, CAF, AU), so a file can
@@ -206,6 +209,7 @@ function WaveformViewerImpl({
 
     const writeClock = (seconds: number) => {
       if (clock.current) clock.current.textContent = formatTime(seconds, 2)
+      bars.current?.setTime(seconds, instance.getDuration())
     }
     instance.on('timeupdate', writeClock)
 
@@ -356,7 +360,8 @@ function WaveformViewerImpl({
         <div className="ml-auto flex items-center gap-2">{children}</div>
       </header>
 
-      <div className="px-4 pb-3 pt-4">
+      <div className="px-4 pb-3 pt-3">
+        {url && <GraphHeading title="Waveform" hint="Loudness over time" first />}
         {/* The overlays cover the waveform only; the spectrogram below is drawn by the
             backend, so it still shows for formats this browser cannot preview. */}
         <div className="relative">
@@ -383,9 +388,31 @@ function WaveformViewerImpl({
             </div>
           )}
         </div>
-        {url && <Spectrogram data={spectrogram} hint="drawing spectrogram…" markers={markers} />}
+        {url && (
+          <>
+            <GraphHeading title="Spectrogram" hint="Pitch over time, brighter is louder" />
+            <Spectrogram data={spectrogram} hint="drawing spectrogram…" markers={markers} />
+            <GraphHeading title="Frequency bars" hint="What's sounding now, low to high" />
+            <FrequencyBars ref={bars} data={spectrogram ?? null} playing={playing} />
+          </>
+        )}
       </div>
     </section>
+  )
+}
+
+/**
+ * The name above each graph in the panel, styled like the palette's category headings
+ * (one step below the panel's h2), with a one-line reading hint on the right.
+ */
+function GraphHeading({ title, hint, first = false }: { title: string; hint: string; first?: boolean }) {
+  return (
+    <div className={`mb-1.5 flex items-baseline justify-between gap-3 ${first ? '' : 'mt-3'}`}>
+      <h3 className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--chef-muted)]">
+        {title}
+      </h3>
+      <span className="min-w-0 truncate text-[10px] text-[var(--chef-muted)]">{hint}</span>
+    </div>
   )
 }
 

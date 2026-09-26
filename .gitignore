@@ -6,3 +6,6 @@ uploads/
 CLAUDE.md
 .claude
 .DS_Store
+.superpowers
+.pytest_cache
+presentation

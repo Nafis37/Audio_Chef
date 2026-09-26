@@ -17,7 +17,7 @@ import type { SpectrogramData, SpectrogramMarker } from '../types'
  * 256 RGB entries, interpolated between a few stops: near-black -> the app's greens ->
  * yellow -> white.  Built once.  Dark = quiet, bright = loud.
  */
-const COLORMAP: Uint8Array = (() => {
+export const COLORMAP: Uint8Array = (() => {
   const stops: [number, [number, number, number]][] = [
     [0.0, [10, 14, 12]],
     [0.3, [20, 60, 40]],
@@ -84,7 +84,7 @@ function SpectrogramImpl({ data, hint = '', markers = [] }: Props) {
     data ? Math.log(hz / data.fMin) / Math.log(data.fMax / data.fMin) : -1
 
   return (
-    <div className="relative mt-2 h-28 overflow-hidden rounded bg-[#0a0e0c]">
+    <div className="relative h-28 overflow-hidden rounded bg-[#0a0e0c]">
       <canvas
         ref={canvas}
         className={`h-full w-full ${data ? '' : 'invisible'}`}
